@@ -1,0 +1,25 @@
+# Level 1 accent classifier stack — single env: .venv (Python 3.13).
+#
+# torch/torchaudio come from the cu126 index (this machine's NVIDIA driver is
+# CUDA 12.7, so cu130/cp314 wheels won't see the GPU). Install with:
+#
+#   uv pip install --python .venv -r requirements.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cu126
+#
+# torch/torchaudio must share a version.
+torch==2.9.1
+torchaudio==2.9.1
+transformers>=4.44
+accelerate>=0.33
+# audio decoding / resampling fallbacks (Common Voice ships mp3)
+soundfile>=0.12
+librosa>=0.10
+# metrics
+scikit-learn>=1.5
+# data
+pandas>=2.2
+numpy>=1.26
+# plotting (infer.py --plot: Level 2 frame-level heatmap)
+matplotlib>=3.8
+# web test UI (src/webui.py: mic/upload -> percentages + frame-level heatmap)
+gradio>=6.0
