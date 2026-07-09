@@ -1,11 +1,3 @@
-안녕! 지금은 2026년 7월 9일 목요일 오후 2시 52분(PDT)이야.
-
-네가 기존에 짰던 탄탄한 파이썬 백엔드(PyTorch 모델) 기획에, 이번에 깃허브에 올린 **'Google AI Studio Edition' (React + Node.js 풀스택 웹 애플리케이션)** 내용을 완벽하게 하나로 융합해서 README.md를 다시 작성해 줄게.
-
-어디 내놔도 손색없는 프로페셔널한 오픈소스 프로젝트 스타일로 구조화했으니까, 이 내용 그대로 복붙해서 쓰면 돼!
-
----
-
 # Speech Classifier System (Google AI Studio Edition)
 
 음성 기반 범죄 수사 보조 도구이자, 실시간으로 AI 합성 음성을 탐지하고 사람의 영어 억양을 분류하도록 설계된 풀스택 웹 애플리케이션입니다. 발화를 2단계 핵심 파이프라인으로 처리하며, Web Audio API를 활용한 실시간 분석 기능을 제공합니다.
@@ -75,30 +67,6 @@
 
 ```
 
-### 2. Python Backend & Model Training 실행 (개발자용)
-
-단일 `.venv` (Python 3.13 + torch 2.9.1+cu126) 환경에서 두 모델의 학습, 추론, 데이터 준비를 모두 수행합니다.
-
-```bash
-# 가상환경 구성 (uv 활용)
-uv python install 3.13
-uv venv --python 3.13 .venv
-uv pip install --python .venv -r requirements.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu126
-
-# [1단계] Detector 학습 및 추론
-.venv/bin/python src/detector/train.py                  # 모델 학습
-.venv/bin/python src/detector/inference.py clip.wav     # 단일 추론
-
-# [2단계] Classifier 학습 및 추론
-.venv/bin/python src/classifier/prepare_data.py         # 매니페스트 생성
-.venv/bin/python src/classifier/train.py --epochs 8 ... # 모델 학습
-.venv/bin/python src/classifier/infer.py clip.mp3       # 단일 추론
-
-# [통합 CLI 모드 실행]
-.venv/bin/python src/app.py path/to/clip.wav
-
-```
 
 > **주의:** 현재 `data/detector`에는 fake 데이터만 존재하므로, 학습 전 `real/` 폴더를 반드시 채워야 합니다.
 
