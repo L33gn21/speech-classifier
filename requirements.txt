@@ -23,5 +23,5 @@ pandas>=2.2
 numpy>=1.26
 # plotting (infer.py --plot: Level 2 frame-level heatmap)
 matplotlib>=3.8
-# web test UI (src/webui.py: mic/upload -> percentages + frame-level heatmap)
+# web test UI (src/app.py: mic/upload -> detector real/fake + classifier percentages + frame-level heatmap)
 gradio>=6.0
