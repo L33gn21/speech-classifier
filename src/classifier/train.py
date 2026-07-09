@@ -5,8 +5,8 @@ head. Pass --unfreeze-top N to also fine-tune the top N transformer layers
 (do this once the head alone is working).
 
 Example:
-    python src/train.py --epochs 8 --batch-size 8 --grad-accum 2
-    python src/train.py --unfreeze-top 4 --lr 2e-5 --epochs 6
+    python src/classifier/train.py --epochs 8 --batch-size 8 --grad-accum 2
+    python src/classifier/train.py --unfreeze-top 4 --lr 2e-5 --epochs 6
 """
 from __future__ import annotations
 

@@ -1,17 +1,27 @@
+import sys
+from pathlib import Path
+
 import torch
 import librosa
 import numpy as np
 
 from model import Detector
 
+# inference.py lives at src/detector/inference.py -> project root is three levels up.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+WEIGHTS = PROJECT_ROOT / "outputs" / "detector" / "detector.pt"
+
+# usage: python src/detector/inference.py <audio.wav>  (defaults to sample.wav)
+audio_path = sys.argv[1] if len(sys.argv) > 1 else "sample.wav"
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 model = Detector().to(device)
-model.load_state_dict(torch.load("detector.pt"))
+model.load_state_dict(torch.load(WEIGHTS, map_location=device))
 model.eval()
 
 audio, sr = librosa.load(
-    "sample.wav",
+    audio_path,
     sr=16000
 )
 

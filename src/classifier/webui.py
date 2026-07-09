@@ -4,8 +4,8 @@ Record from the mic or upload a clip; get per-accent proximity percentages
 (Level 1) plus a frame-level probability heatmap over time (Level 2).
 
 Run:
-    .venv/bin/python src/webui.py
-    .venv/bin/python src/webui.py --model-dir outputs --share
+    .venv/bin/python src/classifier/webui.py
+    .venv/bin/python src/classifier/webui.py --model-dir outputs/classifier --share
 
 Then open the printed http://127.0.0.1:7860 URL.
 """
