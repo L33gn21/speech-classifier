@@ -10,6 +10,7 @@
 ## 구조
 ```
 src/
+  app.py              # 통합 진입점: detector -> classifier. CLI(단일 파일) + 웹 데모(gradio) 겸용
   detector/          # 1단계: 합성 음성 탐지
     model.py           # resnet18(1ch) on log-mel → real/fake
     dataset.py         # real/ + fake/ wav → 정규화 log-mel
@@ -22,7 +23,6 @@ src/
     model.py           # wav2vec2 + frame-level head (Level 2 대비 frame_logits 보존)
     train.py           # HF Trainer 파인튜닝 (fp16, backbone freeze)
     infer.py           # 오디오 -> 억양 % (+ --frames frame-level 히트맵)
-    webui.py           # gradio 데모 (녹음/업로드 -> % + 히트맵)
 
 data/
   detector/          # real/ , fake/  (합성 탐지 학습 데이터)
@@ -77,9 +77,16 @@ uv pip install --python .venv -r requirements.txt \
 # 4. 추론 (기본 --model-dir = outputs/classifier)
 .venv/bin/python src/classifier/infer.py some_clip.mp3
 .venv/bin/python src/classifier/infer.py some_clip.mp3 --plot heatmap.png   # Level 2 미리보기
+```
 
-# 5. 웹 데모
-.venv/bin/python src/classifier/webui.py
+## 실행 — 통합 (detector + classifier)
+```bash
+# 단일 파일 CLI 분석 (fake면 억양 분석은 건너뜀)
+.venv/bin/python src/app.py path/to/clip.wav
+.venv/bin/python src/app.py path/to/clip.wav --frames --json
+
+# 웹 데모 (마이크/업로드 -> detector real/fake + classifier 억양 % + 프레임 히트맵)
+.venv/bin/python src/app.py
 ```
 
 ## 설계 메모

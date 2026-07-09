@@ -16,13 +16,15 @@
 
 ```
 src/
+  app.py           # 통합 진입점: detector -> classifier 파이프라인. CLI(단일 파일 분석)
+                    # 및 웹 데모(gradio, 마이크/업로드 -> 두 모델 결과) 겸용
   detector/        # 1단계: AI 합성 음성 탐지 (WaveFake 등)
     model.py         # resnet18(1ch) on log-mel spectrogram → real/fake 2-class
     dataset.py       # real/ + fake/ wav 로드 → 128x128 정규화 log-mel
     train.py         # 학습 루프 → outputs/detector/detector.pt
     inference.py     # 단일 오디오 → "Real" / "Fake"
   classifier/      # 2단계: 억양(국적) 분류 — 상세는 아래 "분류기" 섹션
-    config.py prepare_data.py dataset.py model.py train.py infer.py webui.py
+    config.py prepare_data.py dataset.py model.py train.py infer.py
 
 data/
   detector/        # 탐지기 학습 데이터 (real/ , fake/) — 아래 "탐지기 데이터" 참고
