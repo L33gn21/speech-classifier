@@ -1,0 +1,1 @@
+{"name":"언어 감지기 (Language Detector)","description":"실시간으로 음성을 인식하여 어떤 언어인지 분석하는 애플리케이션입니다.","requestFramePermissions":["microphone"],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}
