@@ -7,7 +7,7 @@ Recipe (see CLAUDE.md):
   4. balanced under-sampling: TARGET_PER_CLASS clips per accent
   5. speaker-level split by client_id (no speaker in both train and test)
 
-Output: data/manifests/{train,test}.csv with columns
+Output: data/classifier/manifests/{train,test}.csv with columns
         filename,label,accent,client_id
 """
 from __future__ import annotations

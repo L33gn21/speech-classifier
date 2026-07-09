@@ -1,4 +1,4 @@
-# Level 1 accent classifier stack — single env: .venv (Python 3.13).
+# Two-stage stack (detector + accent classifier) — single env: .venv (Python 3.13).
 #
 # torch/torchaudio come from the cu126 index (this machine's NVIDIA driver is
 # CUDA 12.7, so cu130/cp314 wheels won't see the GPU). Install with:
@@ -9,6 +9,8 @@
 # torch/torchaudio must share a version.
 torch==2.9.1
 torchaudio==2.9.1
+# detector backbone: torchvision resnet18 on log-mel spectrograms (must match torch)
+torchvision==0.24.1
 transformers>=4.44
 accelerate>=0.33
 # audio decoding / resampling fallbacks (Common Voice ships mp3)

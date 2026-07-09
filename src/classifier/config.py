@@ -10,13 +10,14 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_ROOT = PROJECT_ROOT / "data" / "cv-corpus-26.0-2026-06-12" / "en"
+# config.py lives at src/classifier/config.py -> project root is three levels up.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_ROOT = PROJECT_ROOT / "data" / "classifier" / "en"
 CLIPS_DIR = DATA_ROOT / "clips"
 VALIDATED_TSV = DATA_ROOT / "validated.tsv"
 
-MANIFEST_DIR = PROJECT_ROOT / "data" / "manifests"
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
+MANIFEST_DIR = PROJECT_ROOT / "data" / "classifier" / "manifests"
+OUTPUT_DIR = PROJECT_ROOT / "outputs" / "classifier"
 
 # ---------------------------------------------------------------------------
 # Label space

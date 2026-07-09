@@ -10,9 +10,8 @@ env/
 # Data
 /data/
 
-# Generated outputs
+# Generated outputs (outputs/classifier, outputs/detector, ...)
 /outputs/
-/outputs_headonly/
 
 # Python cache
 __pycache__/

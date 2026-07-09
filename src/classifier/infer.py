@@ -4,8 +4,8 @@ Outputs per-accent proximity percentages (Level 1). With --frames it also
 returns frame-level probabilities (Level 2 time-axis heatmap material).
 
 Example:
-    python src/infer.py path/to/clip.mp3
-    python src/infer.py clip.mp3 --frames --plot heatmap.png
+    python src/classifier/infer.py path/to/clip.mp3
+    python src/classifier/infer.py clip.mp3 --frames --plot heatmap.png
 """
 from __future__ import annotations
 
