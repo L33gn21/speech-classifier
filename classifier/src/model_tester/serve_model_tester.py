@@ -129,10 +129,63 @@ def list_models() -> list[dict]:
                 entry["test_accuracy"] = m.get("test_accuracy")
                 entry["eval_accuracy"] = m.get("eval_accuracy")
                 entry["macro_f1"] = m.get("test_macro_f1", m.get("eval_macro_f1"))
+                # 나라별 상세치를 볼 수 있는 모델인지 표시(드롭다운은 가볍게 유지하고,
+                # 상세 지표 자체는 선택 시 /metrics/<job> 로 따로 받는다).
+                entry["has_detail"] = ("test_detail" in m or "eval_detail" in m
+                                       or any(k.startswith("test_f1_") for k in m))
             except Exception:
                 pass
         models.append(entry)
     return models
+
+
+def get_metrics(job: str) -> dict:
+    """Full final_metrics.json for one job, normalized for the tester frontend.
+
+    Returns the raw metrics plus a ``detail`` block (labels + per-class
+    precision/recall/f1/support + confusion matrix) when the model was trained
+    with the detailed report. Older models only carry flat ``test_f1_<LABEL>``
+    scalars, so we synthesize a per-class F1 view from those as a fallback — the
+    dashboard then shows per-country F1 bars even for pre-existing models, just
+    without the confusion matrix.
+    """
+    # 선택된 모델의 final_metrics.json 전체를 프론트가 쓰기 좋은 형태로 돌려준다.
+    # 신형 모델은 test_detail(혼동행렬·정밀도·재현율)을 갖고, 구형 모델은 평면적인
+    # test_f1_<LABEL> 스칼라만 있으므로 그것으로 클래스별 F1 뷰를 합성한다(혼동행렬은 없음).
+    bucket_name, prefix = _split_gs(MODEL_ROOT)
+    prefix = prefix.rstrip("/") + "/"
+    bucket = _client().bucket(bucket_name)
+    blob = bucket.blob(f"{prefix}{job}/model/final_metrics.json")
+    if not blob.exists():
+        return {"job": job, "metrics": None, "detail": None}
+    m = json.loads(blob.download_as_bytes())
+
+    def summary(split: str) -> dict:
+        return {
+            "accuracy": m.get(f"{split}_accuracy"),
+            "macro_f1": m.get(f"{split}_macro_f1"),
+            "loss": m.get(f"{split}_loss"),
+        }
+
+    # 상세 블록: 신형은 그대로 사용, 구형은 f1 스칼라로 합성.
+    detail = m.get("test_detail") or m.get("eval_detail")
+    if detail is None:
+        for split in ("test", "eval"):
+            f1s = {k[len(f"{split}_f1_"):]: v for k, v in m.items()
+                   if k.startswith(f"{split}_f1_")}
+            if f1s:
+                detail = {
+                    "labels": list(f1s.keys()),
+                    "per_class": {name: {"f1": v} for name, v in f1s.items()},
+                    "confusion_matrix": None,
+                }
+                break
+    return {
+        "job": job,
+        "test": summary("test"),
+        "eval": summary("eval"),
+        "detail": detail,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +367,25 @@ button.secondary {{ background: #6b7280; }}
 .bar-wrap.top .bar-fill {{ background: #16a34a; }}
 small {{ color: #888; }}
 audio {{ width: 100%; margin-top: 0.6rem; }}
+/* --- model performance viz --- */
+.cards {{ display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.4rem 0 1rem; }}
+.stat {{ background: #f7f9fc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.6rem 0.9rem; min-width: 80px; }}
+.stat-v {{ font-size: 1.3rem; font-weight: 700; color: #1e293b; font-variant-numeric: tabular-nums; }}
+.stat-k {{ font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: .03em; }}
+.sec-title {{ font-weight: 600; margin: 1rem 0 0.4rem; }}
+.pc-row {{ display: grid; grid-template-columns: 2.5rem 1fr 3.2rem; align-items: center; gap: 0.5rem; margin: 0.28rem 0; }}
+.pc-name {{ font-weight: 600; }}
+.pc-track {{ background: #eee; border-radius: 4px; height: 16px; overflow: hidden; }}
+.pc-fill {{ height: 100%; background: #2563eb; }}
+.pc-val {{ text-align: right; font-variant-numeric: tabular-nums; color: #334155; }}
+.pc-sub {{ color: #94a3b8; font-size: 0.75rem; }}
+table.cm {{ border-collapse: collapse; margin-top: 0.3rem; font-variant-numeric: tabular-nums; }}
+table.cm th, table.cm td {{ border: 1px solid #e2e8f0; padding: 0.3rem 0.5rem; text-align: center; min-width: 2.4rem; }}
+table.cm th {{ background: #f8fafc; color: #475569; font-weight: 600; }}
+table.cm td.diag {{ outline: 2px solid #16a34a; outline-offset: -2px; }}
+.cm-axis {{ color: #94a3b8; font-size: 0.75rem; }}
+.legend {{ display: flex; gap: 0.8rem; flex-wrap: wrap; margin: 0.3rem 0; font-size: 0.8rem; color: #475569; }}
+.legend i {{ display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; vertical-align: -1px; margin-right: 0.25rem; }}
 </style></head>
 <body>
 <h1>Model tester</h1>
@@ -325,6 +397,11 @@ audio {{ width: 100%; margin-top: 0.6rem; }}
   <label for="model">Model</label>
   <select id="model"></select>
   <small id="model-meta"></small>
+</div>
+
+<div class="card" id="perf" style="display:none;">
+  <label>Held-out performance</label>
+  <div id="perf-body"></div>
 </div>
 
 <div class="card">
@@ -364,7 +441,7 @@ async function loadModels() {{
       opt.textContent = m.job + acc + (i === 0 ? '  (latest)' : '');
       sel.appendChild(opt);
     }});
-    updateMeta();
+    onModelChange();
   }} catch (e) {{ meta.textContent = 'failed to load models: ' + e; }}
 }}
 
@@ -372,7 +449,103 @@ function updateMeta() {{
   const meta = document.getElementById('model-meta');
   meta.textContent = 'first run of a model loads its weights from GCS (~10-40s), then it stays warm.';
 }}
-document.getElementById('model').onchange = updateMeta;
+function onModelChange() {{ updateMeta(); loadMetrics(); }}
+document.getElementById('model').onchange = onModelChange;
+
+// --- held-out performance viz (fetched per selected model) ---
+const PCT = x => (x == null ? '—' : (x * 100).toFixed(1) + '%');
+// value 0..1 -> blue shade for the confusion-matrix heatmap
+function shade(v) {{
+  const t = Math.max(0, Math.min(1, v));
+  const r = Math.round(255 - t * (255 - 37));
+  const g = Math.round(255 - t * (255 - 99));
+  const b = Math.round(255 - t * (255 - 235));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}}
+
+async function loadMetrics() {{
+  const perf = document.getElementById('perf');
+  const body = document.getElementById('perf-body');
+  const job = document.getElementById('model').value;
+  if (!job) {{ perf.style.display = 'none'; return; }}
+  body.innerHTML = '<span class="pc-sub">loading metrics…</span>';
+  perf.style.display = 'block';
+  try {{
+    const res = await fetch('/metrics/' + encodeURIComponent(job));
+    const data = await res.json();
+    if (!data.ok) {{ body.innerHTML = '<span class="error">error: ' + data.error + '</span>'; return; }}
+    renderMetrics(data);
+  }} catch (e) {{
+    body.innerHTML = '<span class="error">failed to load metrics: ' + e + '</span>';
+  }}
+}}
+
+function statCard(k, v) {{
+  return '<div class="stat"><div class="stat-v">' + v + '</div><div class="stat-k">' + k + '</div></div>';
+}}
+
+function renderMetrics(data) {{
+  const t = data.test || {{}}, ev = data.eval || {{}}, det = data.detail;
+  let html = '<div class="cards">';
+  html += statCard('Test acc', PCT(t.accuracy));
+  html += statCard('Test macro F1', PCT(t.macro_f1));
+  if (ev.accuracy != null) html += statCard('Val acc', PCT(ev.accuracy));
+  if (t.loss != null) html += statCard('Test loss', t.loss.toFixed(3));
+  html += '</div>';
+
+  if (!det || !det.per_class) {{
+    html += '<span class="pc-sub">No per-class metrics saved for this model.</span>';
+    document.getElementById('perf-body').innerHTML = html;
+    return;
+  }}
+
+  // --- per-class bars: F1 (and precision/recall if available) ---
+  const labels = det.labels || Object.keys(det.per_class);
+  const hasPR = labels.some(l => det.per_class[l] && det.per_class[l].recall != null);
+  html += '<div class="sec-title">Per-country ' + (hasPR ? 'recall' : 'F1') +
+          '<span class="pc-sub"> — ' + (hasPR ? 'share of that country\\'s clips predicted correctly' : 'per-class F1') + '</span></div>';
+  labels.forEach(l => {{
+    const pc = det.per_class[l] || {{}};
+    const main = hasPR ? pc.recall : pc.f1;   // recall == per-country accuracy
+    const sub = hasPR
+      ? ' <span class="pc-sub">P ' + PCT(pc.precision) + ' · F1 ' + PCT(pc.f1) +
+        (pc.support != null ? ' · n=' + pc.support : '') + '</span>'
+      : '';
+    html += '<div class="pc-row"><div class="pc-name">' + l + '</div>' +
+            '<div class="pc-track"><div class="pc-fill" style="width:' +
+              ((main == null ? 0 : main * 100).toFixed(1)) + '%"></div></div>' +
+            '<div class="pc-val">' + PCT(main) + '</div></div>' +
+            (sub ? '<div class="pc-row"><div></div><div>' + sub + '</div><div></div></div>' : '');
+  }});
+
+  // --- confusion matrix heatmap (rows=true, cols=pred), row-normalized ---
+  if (det.confusion_matrix) {{
+    const cm = det.confusion_matrix;
+    html += '<div class="sec-title">Confusion matrix ' +
+            '<span class="pc-sub">— rows = true country, cols = predicted, shaded by row %</span></div>';
+    html += '<table class="cm"><thead><tr><th class="cm-axis">true \\\\ pred</th>';
+    labels.forEach(l => html += '<th>' + l + '</th>');
+    html += '</tr></thead><tbody>';
+    cm.forEach((row, i) => {{
+      const total = row.reduce((a, b) => a + b, 0) || 1;
+      html += '<tr><th>' + labels[i] + '</th>';
+      row.forEach((v, j) => {{
+        const frac = v / total;
+        const cls = (i === j) ? ' class="diag"' : '';
+        const fg = frac > 0.6 ? '#fff' : '#334155';
+        html += '<td' + cls + ' style="background:' + shade(frac) + ';color:' + fg +
+                '" title="' + labels[i] + '→' + labels[j] + ': ' + v + ' (' + PCT(frac) + ')">' +
+                v + '</td>';
+      }});
+      html += '</tr>';
+    }});
+    html += '</tbody></table>';
+  }} else {{
+    html += '<div class="pc-sub" style="margin-top:0.6rem;">Confusion matrix available for models trained after this update.</div>';
+  }}
+
+  document.getElementById('perf-body').innerHTML = html;
+}}
 
 // --- recording (browser MediaRecorder -> webm/opus) ---
 document.getElementById('rec').onclick = async () => {{
@@ -478,6 +651,16 @@ def index():
 def models():
     try:
         return jsonify(ok=True, models=list_models())
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc))
+
+
+@app.get("/metrics/<path:job>")
+@login_required
+def metrics(job: str):
+    # 선택된 모델의 상세 지표(나라별 정확도/F1 + 혼동행렬)를 반환.
+    try:
+        return jsonify(ok=True, **get_metrics(job))
     except Exception as exc:
         return jsonify(ok=False, error=str(exc))
 

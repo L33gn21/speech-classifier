@@ -20,6 +20,7 @@ free (time-axis accent heatmap in Level 2) while training on utterance labels.
 # 함께 얻을 수 있다.
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 import torch
@@ -28,6 +29,47 @@ from transformers import Wav2Vec2Config, Wav2Vec2Model
 from transformers.modeling_outputs import ModelOutput
 
 from config import ID2LABEL, LABEL2ID, MODEL_NAME, NUM_LABELS
+
+
+@contextlib.contextmanager
+def _legacy_weight_norm():
+    """Force wav2vec2's positional conv to use the *legacy* torch weight_norm.
+
+    Bug this works around: transformers 4.44 + torch>=2.1 build the wav2vec2
+    positional conv with the *new* ``nn.utils.parametrizations.weight_norm``
+    (state-dict keys ``pos_conv_embed.conv.parametrizations.weight.original0/1``),
+    but the ``facebook/wav2vec2-base`` checkpoint stores the *legacy* keys
+    ``pos_conv_embed.conv.weight_g / weight_v``. The keys don't match, so
+    ``from_pretrained`` leaves pos_conv **randomly initialized** (it prints
+    "Some weights ... were newly initialized: ... pos_conv_embed..."). wav2vec2
+    has no absolute position embedding — this conv is its *only* positional
+    signal — so a random pos_conv silently destroys the pretrained
+    representation and the classifier cannot learn (training loss stays pinned
+    at ln(num_classes)).
+
+    Hiding ``nn.utils.parametrizations.weight_norm`` makes transformers fall back
+    to the legacy ``nn.utils.weight_norm`` (weight_g/weight_v). Used for BOTH the
+    pretrained load (so the checkpoint keys line up) AND the config-only build
+    used at inference (so the module's key layout matches what we saved during
+    training). Restored on exit, so nothing else in the process is affected.
+    """
+    # transformers 4.44 + torch 2.x 조합에서 wav2vec2 위치정보 conv(pos_conv_embed)
+    # 가중치가 사전학습 체크포인트에서 로드되지 않고 랜덤 초기화되는 버그를 회피한다.
+    # wav2vec2는 절대 위치 임베딩이 없어 이 conv가 유일한 위치 신호이므로, 랜덤이면
+    # 사전학습 표현이 깨져 학습 손실이 ln(클래스수)에 고정된다(학습 불가).
+    # 학습(사전학습 로드)과 추론(config만으로 골격 생성) 양쪽에서 동일하게 구형
+    # weight_norm(weight_g/weight_v)을 쓰게 해, 저장한 체크포인트와 키 레이아웃을
+    # 일치시킨다. 컨텍스트를 벗어나면 즉시 원복한다.
+    import torch.nn.utils.parametrizations as _param
+
+    saved = getattr(_param, "weight_norm", None)
+    try:
+        if saved is not None:
+            del _param.weight_norm
+        yield
+    finally:
+        if saved is not None:
+            _param.weight_norm = saved
 
 
 @dataclass
@@ -49,10 +91,15 @@ class AccentClassifier(nn.Module):
         # 추론 시에는(pretrained=False) 골격만 config로 만들고 곧바로 우리
         # safetensors 가중치로 덮어쓰므로, ~360MB짜리 base 백본을 HF에서
         # 다시 받을 필요가 없다(콜드스타트 단축).
-        if pretrained:
-            self.wav2vec2 = Wav2Vec2Model.from_pretrained(model_name)
-        else:
-            self.wav2vec2 = Wav2Vec2Model(Wav2Vec2Config.from_pretrained(model_name))
+        # Both paths build the positional conv under the legacy weight_norm so the
+        # pretrained checkpoint loads (training) and our saved checkpoint reloads
+        # (inference) with matching state-dict keys. See _legacy_weight_norm.
+        # 학습·추론 양쪽 모두 구형 weight_norm으로 pos_conv를 만들어 키를 일치시킨다.
+        with _legacy_weight_norm():
+            if pretrained:
+                self.wav2vec2 = Wav2Vec2Model.from_pretrained(model_name)
+            else:
+                self.wav2vec2 = Wav2Vec2Model(Wav2Vec2Config.from_pretrained(model_name))
         hidden = self.wav2vec2.config.hidden_size
         self.dropout = nn.Dropout(dropout)
         # 분류를 위한 단일 선형층(헤드). hidden 차원 -> 클래스 개수로 매핑.
@@ -68,6 +115,28 @@ class AccentClassifier(nn.Module):
         # 원시 파형을 특징으로 변환하는 CNN 인코더 부분은 항상 동결(freeze)한다.
         # 이는 wav2vec2 파인튜닝에서 일반적으로 쓰이는 관례다.
         self.wav2vec2.feature_extractor._freeze_parameters()
+
+        # Force gradient checkpointing OFF on the backbone. The wav2vec2-base
+        # config ships gradient_checkpointing=True, which gets auto-enabled; in
+        # *reentrant* mode (the default; our use_reentrant=False is only wired to
+        # the TrainingArguments path, which the default recipe doesn't trigger) a
+        # checkpointed segment whose inputs don't require grad silently drops
+        # gradients ("None of the inputs have requires_grad=True. Gradients will
+        # be None"). With the lower layers frozen that severs gradient flow to the
+        # unfrozen top layers, so the model can't fit even a tiny set. We enable
+        # checkpointing explicitly (use_reentrant=False) via TrainingArguments
+        # only when asked, so keep it off here by default.
+        # 백본의 그래디언트 체크포인팅을 강제로 끈다. wav2vec2-base config에
+        # gradient_checkpointing=True 가 들어 있어 자동 활성화되는데, reentrant
+        # 모드에서 하위 동결 레이어의 체크포인트 입력이 grad를 요구하지 않으면
+        # 그래디언트가 조용히 끊겨("Gradients will be None") 상위 언프리즈 레이어가
+        # 학습되지 않는다. 필요할 때만 TrainingArguments 로 use_reentrant=False로
+        # 명시 활성화하므로, 기본은 여기서 꺼 둔다.
+        self.wav2vec2.config.gradient_checkpointing = False
+        try:
+            self.wav2vec2.gradient_checkpointing_disable()
+        except Exception:
+            pass
 
     # -- freezing helpers -----------------------------------------------------
     # -- 파라미터 동결/해제 관련 헬퍼 함수들 -----------------------------------

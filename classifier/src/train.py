@@ -36,7 +36,12 @@ import json
 import os
 
 import numpy as np
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_fscore_support,
+)
 from transformers import Trainer, TrainingArguments, Wav2Vec2FeatureExtractor
 
 from config import (
@@ -70,6 +75,37 @@ def compute_metrics(eval_pred):
     for i, name in ID2LABEL.items():
         metrics[f"f1_{name}"] = float(per_class_f1[i])
     return metrics
+
+
+def detailed_report(preds: np.ndarray, labels: np.ndarray) -> dict:
+    """Per-class precision/recall/f1/support + confusion matrix for the model tester.
+
+    ``compute_metrics`` only surfaces the scalars HF Trainer needs for model
+    selection (accuracy, macro-F1, per-class F1). The tester dashboard wants a
+    richer, per-country breakdown, so from the raw predictions we also compute
+    precision/recall/support and the full confusion matrix and stash them in
+    ``final_metrics.json`` under nested keys. Keyed by label name so it survives
+    label-order changes and is self-describing to the frontend.
+    """
+    # 모델 테스터 대시보드용 상세 지표: 클래스별 precision/recall/f1/support 와
+    # 혼동 행렬. compute_metrics 는 모델 선택에 필요한 스칼라만 내보내므로,
+    # 여기서 원본 예측으로부터 나라별 상세치를 추가로 계산해 final_metrics.json 에
+    # 중첩 키로 저장한다(프론트가 그대로 시각화).
+    ids = list(range(len(LABELS)))
+    p, r, f1, support = precision_recall_fscore_support(
+        labels, preds, labels=ids, zero_division=0
+    )
+    per_class = {
+        LABELS[i]: {
+            "precision": float(p[i]),
+            "recall": float(r[i]),        # 대각선 재현율 = 그 나라 클립을 맞춘 비율
+            "f1": float(f1[i]),
+            "support": int(support[i]),
+        }
+        for i in ids
+    }
+    cm = confusion_matrix(labels, preds, labels=ids)
+    return {"labels": LABELS, "per_class": per_class, "confusion_matrix": cm.tolist()}
 
 
 def main() -> None:
@@ -145,6 +181,25 @@ def main() -> None:
     total = sum(p.numel() for p in model.parameters())
     print(f"trainable params: {trainable:,} / {total:,}")
 
+    # --- diagnostic: do pooled logits actually vary across different clips? ---
+    # 서로 다른 클립이 서로 다른 pooled 출력을 내는지 확인. batch-std 가 0에 가까우면
+    # 피처가 붕괴(모든 입력이 사실상 같은 표현)한 것이고, 그러면 헤드가 클래스를
+    # 분리할 수 없어 손실이 ln(클래스수)에 갇힌다. 학습 시작 전 1회만 찍는다.
+    import torch as _torch
+    _n = min(16, len(train_ds))
+    if _n >= 2:
+        model.eval()
+        with _torch.no_grad():
+            _b = collator([train_ds[i] for i in range(_n)])
+            _out = model(input_values=_b["input_values"],
+                         attention_mask=_b.get("attention_mask"))
+            _lg = _out.logits  # [n, C]
+            _bstd = float(_lg.std(dim=0).mean())   # variation ACROSS clips (want > 0)
+            _lbl = [int(train_ds[i]["label"]) for i in range(_n)]
+            print(f"[diag] pooled logits {tuple(_lg.shape)}  across-clip std={_bstd:.4f}  "
+                  f"pred={_lg.argmax(-1).tolist()}  true={_lbl}")
+        model.train()
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -189,12 +244,21 @@ def main() -> None:
     )
 
     trainer.train()
-    val_metrics = trainer.evaluate(eval_ds)
+    # predict() (evaluate() 대신) 를 써서 스칼라 지표와 "원본 예측"을 함께 얻는다.
+    # 원본 예측이 있어야 혼동 행렬·클래스별 precision/recall 을 계산할 수 있다.
+    val_out = trainer.predict(eval_ds, metric_key_prefix="eval")
+    val_metrics = val_out.metrics
     print("final val eval:", json.dumps(val_metrics, indent=2))
     # 학습에 전혀 쓰이지 않은 홀드아웃 test 셋으로 최종 성능도 측정.
-    test_metrics = trainer.evaluate(test_ds, metric_key_prefix="test")
+    test_out = trainer.predict(test_ds, metric_key_prefix="test")
+    test_metrics = test_out.metrics
     print("final test eval:", json.dumps(test_metrics, indent=2))
     metrics = {**val_metrics, **test_metrics}
+    # 나라별 상세 지표 + 혼동 행렬을 (val/test 각각) 중첩 키로 함께 저장한다.
+    metrics["eval_detail"] = detailed_report(
+        np.argmax(val_out.predictions, axis=-1), val_out.label_ids)
+    metrics["test_detail"] = detailed_report(
+        np.argmax(test_out.predictions, axis=-1), test_out.label_ids)
 
     # persist head + backbone weights, feature extractor, and label config
     # 학습된 헤드+백본 가중치, feature extractor 설정, 레이블 매핑 정보를

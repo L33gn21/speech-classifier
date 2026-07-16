@@ -21,13 +21,14 @@
 
 ```
 gs://qi-ucsd-speech-usw2/
-├── curated/                       ← USE THIS for training (Standard storage)
+├── curated/                       ← USE THIS for training (Standard storage; 5k rebuild, §3)
 │   ├── US/  {manifest.csv, audio/(glb_*.flac, saa_*.mp3)}
 │   ├── UK/  {manifest.csv, audio/}
 │   ├── CA/  {manifest.csv, audio/}
 │   ├── AU/  {manifest.csv, audio/}
 │   ├── IN/  {manifest.csv, audio/}
 │   └── CN/  {manifest.csv, audio/}
+├── _archive/curated_v1_8k/        ← previous 8.1k curated pool (superseded, §3)
 ├── raw/                           ← ARCHIVE / rebuild pool (Standard for now)
 │   ├── globe/data/*.parquet       (110 shards, 581,725 clips, 24 kHz, CC0)
 │   └── saa/  {audio/saa_*.mp3, saa_manifest.csv}   (2,136 speakers, GMU)
@@ -67,14 +68,24 @@ The country label **is the folder** (`US`/`UK`/`CA`/`AU`/`IN`/`CN`), not a colum
 
 | Class | Clips | Speakers | F / M / U | Sources (clips) | Label axis |
 |-------|------:|---------:|:---------:|-----------------|------------|
-| **US** | 1,514 | 280 | 790 / 724 / 0 | GLOBE 1,434 · SAA 80 | country (usa) |
-| **UK** | 1,469 | 264 | 775 / 694 / 0 | GLOBE 1,405 · SAA 64 | country (uk) |
-| **CA** | 1,527 | 254 | 720 / 807 / 0 | GLOBE 1,473 · SAA 54 | country (canada) |
-| **AU** | 1,494 | 233 | 734 / 760 / 0 | GLOBE 1,461 · SAA 33 | country (australia) |
-| **IN** | 1,446 | 274 | 728 / 718 / 0 | GLOBE 1,372 · SAA 74 | country (india+pakistan) |
-| **CN** | 679 | 164 | 254 / 417 / 8 | GLOBE 605 (Hong Kong) · SAA 74 | **native_language** (mandarin+cantonese) |
+| **US** | 6,243 | 840 | 3,316 / 2,927 / 0 | GLOBE 6,163 · SAA 80 | country (usa) |
+| **UK** | 5,933 | 824 | 2,740 / 3,193 / 0 | GLOBE 5,869 · SAA 64 | country (uk) |
+| **CA** | 6,002 | 695 | 2,145 / 3,585 / 272 | GLOBE 5,948 · SAA 54 | country (canada) |
+| **AU** | 4,825 | 642 | 1,653 / 3,058 / 114 | GLOBE 4,792 · SAA 33 | country (australia) |
+| **IN** | 4,064 | 609 | 1,183 / 2,881 / 0 | GLOBE 3,990 · SAA 74 | country (india+pakistan) |
+| **CN** | 1,170 | 164 | 349 / 813 / 8 | GLOBE 1,096 (Hong Kong) · SAA 74 | **native_language** (mandarin+cantonese) |
 
-Total: **8,129 clips**. Each `manifest.csv` row count matches these.
+Total: **28,237 clips**. Each `manifest.csv` row count matches these.
+
+> **5k-scale rebuild (2026-07-16, `spec_5k.json`).** These counts supersede the
+> original ~8.1k build (US/UK/CA/AU/IN ~1.5k, CN 679). The clip counts were
+> too small, so the curation caps were raised — see §4. The old 8.1k pool is
+> archived at `gs://qi-ucsd-speech-usw2/_archive/curated_v1_8k/` (rebuildable
+> from `raw/` + `_curate/spec.json` anyway). **CN is unchanged (~1.2k, the
+> floor):** GLOBE Hong Kong English has only 90 speakers / 1,096 clips total, so
+> CN cannot scale with the others without a new source (SpeechOcean762 mainland
+> CN — see §5). The imbalance is intentional; training absorbs it with
+> macro-F1 + class weighting and can cap at `--per-class` (config default 5000).
 
 - **Audio formats:** GLOBE clips are **FLAC @ 24 kHz**; SAA clips are **mp3**.
   Normalization (16 kHz mono, loudness) is a required preprocessing step — see §6.
@@ -91,8 +102,13 @@ Total: **8,129 clips**. Each `manifest.csv` row count matches these.
 Per class, deterministic (`seed=42`), speaker-namespaced, with a global fname
 dedupe so no clip lands in two classes:
 
-- **GLOBE** (volume backbone): up to **100 F + 100 M speakers**, **≤15 clips/speaker**,
-  gender balanced. Matched by exact `accent` string (Common-Voice-style labels —
+- **GLOBE** (volume backbone): up to **380 F + 380 M speakers**, **≤20 clips/speaker**,
+  gender balanced (5k rebuild caps; the original 8.1k build used 100+100 / ≤15).
+  GLOBE clips/speaker are heavy-right-skewed (~8 clips/speaker in a random
+  sample), so **speaker count is the real lever** for reaching ~5k/class — not
+  clips/speaker. `CN` overrides the clip cap to take all 1,096 of its Hong Kong
+  clips (only 90 speakers exist). `IN`/`AU` are speaker-limited (535/609 GLOBE
+  speakers available) so they land at ~4k. Matched by exact `accent` string (Common-Voice-style labels —
   see `reports/globe_report.json` for the exact values & counts). Class → accent:
   `US`←"United States English"; `UK`←{"England English","Scottish English",
   "Welsh English"}; `CA`←"Canadian English"; `AU`←"Australian English";
