@@ -101,6 +101,99 @@ def collect_manifests(root: str, classes: list[str]) -> dict[str, pd.DataFrame]:
     return dfs
 
 
+# fname 접두어 -> 소스 코드. 용량을 소스별로 쪼개 길이를 추정할 때 쓴다.
+_PREFIX_TO_SOURCE = {"glb_": "GLOBE", "saa_": "SAA"}
+
+# 소스별(코덱별) 대략적인 초당 바이트. curated 오디오는 GLOBE=FLAC@24kHz,
+# SAA=mp3 라서 코덱이 다르다. manifest 에는 길이(duration) 컬럼이 없으므로,
+# 실제 오디오를 내려받지 않고 "파일 용량 ÷ 초당바이트"로 총 길이를 어림한다.
+# 이 값들은 추정치이며(압축률·비트레이트에 따라 달라짐) 화면에도 "est."로 표기한다.
+_EST_BYTES_PER_SEC = {"GLOBE": 26_000.0, "SAA": 16_000.0, "other": 20_000.0}
+
+
+def _source_of(fname: str) -> str:
+    for pre, src in _PREFIX_TO_SOURCE.items():
+        if fname.startswith(pre):
+            return src
+    return "other"
+
+
+def _est_seconds(by_source: dict[str, int]) -> float:
+    # 소스별 용량을 각 코덱의 초당바이트로 나눠 더한 "추정" 총 길이(초).
+    return sum(b / _EST_BYTES_PER_SEC.get(src, _EST_BYTES_PER_SEC["other"])
+               for src, b in by_source.items())
+
+
+def collect_audio_stats(root: str, classes: list[str]) -> dict[str, dict]:
+    """Per-class audio storage stats from object metadata — no audio download.
+
+    For each class we sum ``curated/<CC>/audio/*`` object sizes (``blob.size``
+    on GCS, ``stat().st_size`` locally) and split the total by source (glb_/saa_
+    filename prefix). Only metadata is read, so this stays cheap even for the
+    full pool. Returns ``{cc: {"n": int, "bytes": int, "by_source": {src: bytes}}}``;
+    classes whose audio dir can't be listed are simply omitted (size is an
+    enhancement — never let it break the counts view).
+    """
+    # 클래스별 오디오 "용량" 통계를 오브젝트 메타데이터만으로 집계한다(오디오 자체는
+    # 내려받지 않음 → curated 는 Standard 스토리지라 비용 부담 없음). blob.size 를
+    # 합산하고 fname 접두어(glb_/saa_)로 소스별로 쪼갠다. 나열 실패한 클래스는 조용히
+    # 건너뛴다(용량은 부가 정보이므로 클립수 화면을 절대 깨뜨리지 않는다).
+    stats: dict[str, dict] = {}
+    root = root.rstrip("/")
+    for cc in classes:
+        try:
+            by_source: dict[str, int] = {}
+            n = 0
+            if root.startswith("gs://"):
+                bucket_name, _, prefix = root[len("gs://"):].partition("/")
+                audio_prefix = (f"{prefix}/{cc}/audio/" if prefix else f"{cc}/audio/")
+                for blob in _gcs().list_blobs(bucket_name, prefix=audio_prefix):
+                    if blob.name.endswith("/"):
+                        continue
+                    base = blob.name.rsplit("/", 1)[-1]
+                    src = _source_of(base)
+                    by_source[src] = by_source.get(src, 0) + int(blob.size or 0)
+                    n += 1
+            else:
+                adir = Path(root) / cc / "audio"
+                if adir.is_dir():
+                    for p in adir.iterdir():
+                        if not p.is_file():
+                            continue
+                        src = _source_of(p.name)
+                        by_source[src] = by_source.get(src, 0) + p.stat().st_size
+                        n += 1
+            if n:
+                total = sum(by_source.values())
+                stats[cc] = {"n": n, "bytes": total, "by_source": by_source,
+                             "est_seconds": _est_seconds(by_source)}
+                print(f"  {cc}: {n} audio files, {human_size(total)}")
+        except Exception as exc:  # 용량 집계 실패는 치명적이지 않다 — 건너뛴다.
+            print(f"  ! {cc}: audio stat failed: {exc}")
+    return stats
+
+
+def human_size(nbytes: float) -> str:
+    # 바이트를 사람이 읽기 좋은 단위(KB/MB/GB)로 변환.
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if nbytes < 1024 or unit == "TB":
+            return f"{nbytes:.0f} {unit}" if unit == "B" else f"{nbytes:.1f} {unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f} TB"
+
+
+def human_duration(seconds: float) -> str:
+    # 초를 "Xh Ym" / "Ym Zs" 형태로 변환.
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
 def fig_to_data_uri(fig: plt.Figure) -> str:
     # matplotlib Figure를 PNG로 렌더링한 뒤 base64로 인코딩해 data URI로 변환.
     # 이렇게 하면 별도 이미지 파일 없이 HTML 하나에 모든 차트를 임베드할 수 있다.
@@ -154,6 +247,29 @@ def chart_source_breakdown(dfs: dict[str, pd.DataFrame]) -> str:
     return fig_to_data_uri(fig)
 
 
+def chart_storage_per_class(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) -> str:
+    # 클래스별 오디오 총 용량(MB)을 소스별 누적 막대그래프로 표시.
+    classes = [c for c in dfs if c in stats]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    if not classes:
+        ax.text(0.5, 0.5, "no size metadata", ha="center", va="center")
+        ax.axis("off")
+        return fig_to_data_uri(fig)
+    all_sources = sorted({s for c in classes for s in stats[c]["by_source"]})
+    colors = plt.get_cmap("tab10").colors
+    bottom = [0.0] * len(classes)
+    for i, src in enumerate(all_sources):
+        vals = [stats[c]["by_source"].get(src, 0) / (1024 * 1024) for c in classes]
+        ax.bar(classes, vals, bottom=bottom, label=src, color=colors[i % len(colors)])
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    for i, c in enumerate(classes):
+        ax.text(i, bottom[i], human_size(stats[c]["bytes"]), ha="center", va="bottom", fontsize=8)
+    ax.set_ylabel("audio size (MB)")
+    ax.set_title("Storage per class by source")
+    ax.legend(fontsize=8)
+    return fig_to_data_uri(fig)
+
+
 def chart_gender_balance(dfs: dict[str, pd.DataFrame]) -> str:
     # 클래스별 성별(F/M/미상 U) 분포를 누적 막대그래프로 표시.
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -173,33 +289,90 @@ def chart_gender_balance(dfs: dict[str, pd.DataFrame]) -> str:
     return fig_to_data_uri(fig)
 
 
-def build_summary_table(dfs: dict[str, pd.DataFrame]) -> str:
-    # 클래스별 요약 통계(클립 수, 화자 수, 성비, 출처 분포)를 HTML 표로 생성.
+def build_headline(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) -> str:
+    # 데이터셋 전체 규모를 한눈에 보는 상단 통계 카드 묶음.
+    total_clips = sum(len(df) for df in dfs.values())
+    total_speakers = sum(df["speaker"].nunique() for df in dfs.values())
+    total_bytes = sum(s["bytes"] for s in stats.values())
+    total_secs = sum(s["est_seconds"] for s in stats.values())
+    avg_kb = (total_bytes / max(sum(s["n"] for s in stats.values()), 1) / 1024)
+    cards = [
+        ("Classes", str(len(dfs))),
+        ("Clips", f"{total_clips:,}"),
+        ("Speakers", f"{total_speakers:,}"),
+    ]
+    if stats:
+        cards += [
+            ("Total size", human_size(total_bytes)),
+            ("Avg clip", f"{avg_kb:.0f} KB"),
+            ("Est. duration", "≈ " + human_duration(total_secs)),
+        ]
+    return ('<div class="cards">'
+            + "".join(f'<div class="stat"><div class="stat-v">{v}</div>'
+                      f'<div class="stat-k">{k}</div></div>' for k, v in cards)
+            + "</div>")
+
+
+def build_summary_table(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) -> str:
+    # 클래스별 요약 통계(클립 수, 화자 수, 성비, 용량, 추정 길이, 출처)를 HTML 표로 생성.
+    has_size = bool(stats)
+    size_head = "<th>Size</th><th>Avg clip</th><th>Est. dur.</th>" if has_size else ""
     rows = []
+    tot_clips = tot_spk = tot_bytes = tot_n = 0
+    tot_secs = 0.0
     for cc, df in dfs.items():
         clips = len(df)
         speakers = df["speaker"].nunique()
         f = int((df["gender"] == "F").sum())
         m = int((df["gender"] == "M").sum())
         sources = ", ".join(f"{s}={n}" for s, n in df["source"].value_counts().items())
+        tot_clips += clips
+        tot_spk += speakers
+        size_cells = ""
+        if has_size:
+            st = stats.get(cc)
+            if st:
+                avg_kb = st["bytes"] / max(st["n"], 1) / 1024
+                size_cells = (f"<td>{human_size(st['bytes'])}</td>"
+                              f"<td>{avg_kb:.0f} KB</td>"
+                              f"<td>≈ {human_duration(st['est_seconds'])}</td>")
+                tot_bytes += st["bytes"]
+                tot_n += st["n"]
+                tot_secs += st["est_seconds"]
+            else:
+                size_cells = "<td>—</td><td>—</td><td>—</td>"
         rows.append(f"<tr><td>{cc}</td><td>{clips}</td><td>{speakers}</td>"
-                     f"<td>{f} / {m}</td><td>{sources}</td></tr>")
+                     f"<td>{f} / {m}</td>{size_cells}<td>{sources}</td></tr>")
+    # 합계 행
+    tot_size_cells = ""
+    if has_size:
+        avg_kb = tot_bytes / max(tot_n, 1) / 1024
+        tot_size_cells = (f"<td>{human_size(tot_bytes)}</td><td>{avg_kb:.0f} KB</td>"
+                          f"<td>≈ {human_duration(tot_secs)}</td>")
+    total_row = (f'<tr class="total"><td>Total</td><td>{tot_clips}</td><td>{tot_spk}</td>'
+                 f"<td></td>{tot_size_cells}<td></td></tr>")
+    note = ('<p class="note">Size is exact (object metadata). '
+            "“Est. dur.” is estimated from file size per codec (GLOBE FLAC / SAA mp3) — "
+            "manifests have no per-clip duration, so treat it as a rough total.</p>"
+            if has_size else "")
     return (
         "<table><thead><tr><th>Class</th><th>Clips</th><th>Speakers</th>"
-        "<th>F / M</th><th>Sources</th></tr></thead><tbody>"
-        + "".join(rows) + "</tbody></table>"
+        f"<th>F / M</th>{size_head}<th>Sources</th></tr></thead><tbody>"
+        + "".join(rows) + total_row + "</tbody></table>" + note
     )
 
 
 # 리포트 "본문" 템플릿(표 + 차트). 정적 HTML 파일에도, 서버 모드의 새로고침
 # 응답(innerHTML 교체)에도 그대로 재사용된다.
 BODY_TEMPLATE = """<p class="meta">Source root: <code>{root}</code> &middot; generated {generated}</p>
+{headline}
 {table}
 <div class="charts">
 <img src="{c1}">
 <img src="{c2}">
 <img src="{c3}">
 <img src="{c4}">
+<img src="{c5}">
 </div>
 """
 
@@ -214,6 +387,13 @@ h1 {{ margin-bottom: 0; }}
 table {{ border-collapse: collapse; margin: 1.5rem 0; }}
 th, td {{ border: 1px solid #ccc; padding: 0.4rem 0.8rem; text-align: left; }}
 th {{ background: #f2f2f2; }}
+tr.total td {{ font-weight: 700; background: #fafafa; border-top: 2px solid #999; }}
+.note {{ color: #888; font-size: 0.85rem; max-width: 640px; }}
+.cards {{ display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 1.2rem 0; }}
+.stat {{ background: #f7f9fc; border: 1px solid #e2e8f0; border-radius: 8px;
+         padding: 0.7rem 1.1rem; min-width: 92px; }}
+.stat-v {{ font-size: 1.35rem; font-weight: 700; color: #1e293b; }}
+.stat-k {{ font-size: 0.78rem; color: #64748b; text-transform: uppercase; letter-spacing: .03em; }}
 .charts {{ display: flex; flex-wrap: wrap; gap: 1.5rem; }}
 .charts img {{ max-width: 100%; border: 1px solid #ddd; }}
 </style></head>
@@ -225,15 +405,23 @@ th {{ background: #f2f2f2; }}
 
 
 def render_body(root: str, dfs: dict[str, pd.DataFrame]) -> str:
-    """Table + charts only — no <html>/<head> wrapper. Shared by CLI and server."""
+    """Table + charts only — no <html>/<head> wrapper. Shared by CLI and server.
+
+    Also reads per-class audio storage stats (object metadata only, no audio
+    download) so the report shows total/avg file size and an estimated total
+    duration alongside the clip counts.
+    """
+    stats = collect_audio_stats(root, list(dfs.keys()))
     return BODY_TEMPLATE.format(
         root=root,
         generated=datetime.datetime.now().isoformat(timespec="seconds"),
-        table=build_summary_table(dfs),
+        headline=build_headline(dfs, stats),
+        table=build_summary_table(dfs, stats),
         c1=chart_clips_per_class(dfs),
         c2=chart_speakers_per_class(dfs),
         c3=chart_source_breakdown(dfs),
         c4=chart_gender_balance(dfs),
+        c5=chart_storage_per_class(dfs, stats),
     )
 
 

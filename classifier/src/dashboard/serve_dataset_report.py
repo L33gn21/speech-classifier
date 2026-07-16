@@ -149,6 +149,13 @@ h1 {{ margin-bottom: 0; display: inline-block; margin-right: 1rem; }}
 table {{ border-collapse: collapse; margin: 1.5rem 0; }}
 th, td {{ border: 1px solid #ccc; padding: 0.4rem 0.8rem; text-align: left; }}
 th {{ background: #f2f2f2; }}
+tr.total td {{ font-weight: 700; background: #fafafa; border-top: 2px solid #999; }}
+.note {{ color: #888; font-size: 0.85rem; max-width: 640px; }}
+.cards {{ display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 1.2rem 0; }}
+.stat {{ background: #f7f9fc; border: 1px solid #e2e8f0; border-radius: 8px;
+         padding: 0.7rem 1.1rem; min-width: 92px; }}
+.stat-v {{ font-size: 1.35rem; font-weight: 700; color: #1e293b; }}
+.stat-k {{ font-size: 0.78rem; color: #64748b; text-transform: uppercase; letter-spacing: .03em; }}
 .charts {{ display: flex; flex-wrap: wrap; gap: 1.5rem; }}
 .charts img {{ max-width: 100%; border: 1px solid #ddd; }}
 #refresh {{ font-size: 1rem; padding: 0.4rem 1rem; cursor: pointer; }}

@@ -115,8 +115,10 @@ def globe_select(work_globe: list[str], spec: dict, rng: random.Random):
     if not accent_to_cc:
         return {cc: {} for cc in spec["classes"]}, {}
 
-    cap_spk = spec.get("globe_speakers_per_gender", 100)
-    cap_clip = spec.get("globe_clips_per_speaker", 30)
+    # global caps; a class may override either in its spec entry (lets a
+    # speaker-limited class like IN raise its clip cap without touching others)
+    g_cap_spk = spec.get("globe_speakers_per_gender", 100)
+    g_cap_clip = spec.get("globe_clips_per_speaker", 30)
 
     # pass 1 — gather candidate clips per class, grouped by (speaker, gender)
     # cand[cc][speaker] = {"gender":g, "clips":[(shard,row,age), ...]}
@@ -146,6 +148,9 @@ def globe_select(work_globe: list[str], spec: dict, rng: random.Random):
     kept = {cc: {} for cc in spec["classes"]}
     summary = {}
     for cc in spec["classes"]:
+        cspec = spec["classes"][cc]
+        cap_spk = cspec.get("globe_speakers_per_gender", g_cap_spk)
+        cap_clip = cspec.get("globe_clips_per_speaker", g_cap_clip)
         by_gender = {"F": [], "M": [], "U": []}
         for spk, e in cand[cc].items():
             by_gender.setdefault(e["gender"], []).append(spk)
@@ -295,6 +300,10 @@ def main():
     ap.add_argument("--out", default="/mnt/work/curated")
     ap.add_argument("--globe-dir", default="/mnt/work/globe_parquet",
                     help="local dir to stage parquet shards")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="GLOBE pass-1 only: print per-class speaker/clip counts "
+                         "then exit (no audio extraction, no SAA copy, no upload). "
+                         "Use it to tune the caps toward the target before a full run.")
     args = ap.parse_args()
 
     spec = json.load(open(args.spec, encoding="utf-8"))
@@ -321,6 +330,18 @@ def main():
             local_shards.append(dst)
             log(f"  staged {len(local_shards)}/{len(shards)} {base}")
         kept, gsum = globe_select(local_shards, spec, rng)
+        if args.dry_run:
+            log("== DRY RUN (GLOBE pass-1 only) ==")
+            total = 0
+            for cc in spec["classes"]:
+                s = gsum.get(cc, {"globe_speakers": 0, "globe_clips": 0})
+                total += s["globe_clips"]
+                log(f"  {cc:3s} GLOBE: {s['globe_speakers']:5d} speakers  "
+                    f"{s['globe_clips']:6d} clips  (+SAA up to "
+                    f"{2 * spec.get('saa_speakers_per_gender', 40)} to follow)")
+            log(f"  TOTAL GLOBE clips: {total}")
+            log("dry run complete — no files written, no upload.")
+            return
         globe_extract(local_shards, kept, args.out, manifests)
 
     ssum = saa_build(args.bucket, spec, rng, args.out, manifests)
