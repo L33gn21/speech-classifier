@@ -1,0 +1,52 @@
+{
+  "_comment": "Candidate NEW classes (not the original 8). Exact GLOBE accent strings are from reports/globe_report.json. Trim the 'classes' map to the set you choose, then run: python3 curate.py --bucket qi-ucsd-speech-usw2 --spec <this> --out /mnt/work/curated. Set 'axis' to 'country' (SAA filtered by birthplace country) or 'language' (SAA filtered by native_language).",
+  "axis": "country",
+  "seed": 42,
+  "globe_speakers_per_gender": 100,
+  "globe_clips_per_speaker": 30,
+  "saa_speakers_per_gender": 40,
+  "classes": {
+    "PH": {
+      "_note": "Filipino English. GLOBE 220 spk / 3619 clips (strongest new class by speakers) + SAA.",
+      "globe_accents": ["Filipino"],
+      "saa_countries": ["philippines"],
+      "saa_languages": ["tagalog"]
+    },
+    "NZ": {
+      "_note": "New Zealand English (native). GLOBE 206 spk / 2895 clips + SAA.",
+      "globe_accents": ["New Zealand English"],
+      "saa_countries": ["new zealand"],
+      "saa_languages": []
+    },
+    "IE": {
+      "_note": "Irish English (native). GLOBE 146 spk / 2920 clips + SAA. Note: 'Northern Irish' is a separate GLOBE label with only 7 speakers - NOT included.",
+      "globe_accents": ["Irish English"],
+      "saa_countries": ["ireland"],
+      "saa_languages": []
+    },
+    "DE": {
+      "_note": "German-accented English (L2). GLOBE 142 spk / 8488 clips (highest volume new class) + SAA.",
+      "globe_accents": ["German English,Non native speaker"],
+      "saa_countries": ["germany"],
+      "saa_languages": ["german"]
+    },
+    "HK": {
+      "_note": "Hong Kong English (ESL). GLOBE 90 spk / 1096 clips + SAA. Consider whether to keep separate from a China class.",
+      "globe_accents": ["Hong Kong English"],
+      "saa_countries": ["hong kong"],
+      "saa_languages": ["cantonese"]
+    },
+    "ZA": {
+      "_note": "Southern African English (native-ish). GLOBE 68 spk / 1251 clips + SAA.",
+      "globe_accents": ["Southern African (South Africa, Zimbabwe, Namibia)"],
+      "saa_countries": ["south africa"],
+      "saa_languages": ["afrikaans"]
+    },
+    "SCT": {
+      "_note": "Scottish English (UK sub-region). GLOBE 135 spk / 2938 clips. Only include if you want intra-UK granularity.",
+      "globe_accents": ["Scottish English"],
+      "saa_countries": [],
+      "saa_languages": []
+    }
+  }
+}

@@ -1,0 +1,7 @@
+gcloud/
+*.md
+__pycache__/
+*.pyc
+.venv/
+outputs/
+data/

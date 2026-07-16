@@ -1,0 +1,7 @@
+# Dashboard-only deps — deliberately excludes torch/transformers (training
+# requirements.txt) so the Cloud Run image stays small and cheap.
+flask>=3.0
+gunicorn>=22.0
+pandas>=2.2
+matplotlib>=3.8
+google-cloud-storage>=2.18
