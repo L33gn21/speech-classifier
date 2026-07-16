@@ -1,0 +1,263 @@
+"""Dataset visualization report for the curated speech-accent corpus.
+
+Reads `curated/<CC>/manifest.csv` (schema: fname, source, speaker, gender,
+age, accent — see classifier/DATASET.md §2) for each target class and writes
+a single self-contained HTML report with charts to REPORT_OUT.
+
+This module also backs `serve_dataset_report.py`, a small local web server
+with a "Refresh" button that re-reads the manifests on demand.
+
+Usage:
+    python inspect_dataset.py
+    python inspect_dataset.py --root gs://qi-ucsd-speech-us/curated
+    python inspect_dataset.py --root ../curated --classes US UK IN KR
+
+Live dashboard (refresh button, no need to re-run manually):
+    python serve_dataset_report.py
+"""
+# 정제된(curated) 억양 음성 데이터셋을 위한 시각화 리포트 생성 모듈.
+#
+# 각 타깃 클래스별로 `curated/<국가코드>/manifest.csv`
+# (스키마: fname, source, speaker, gender, age, accent — 자세한 내용은
+# classifier/DATASET.md §2 참조)를 읽어들여, 차트들이 포함된 하나의
+# 독립적인(self-contained) HTML 리포트를 REPORT_OUT 경로에 생성한다.
+#
+# 이 모듈은 serve_dataset_report.py(새로고침 버튼이 있는 로컬 웹 서버)에서도
+# 그대로 재사용된다. CLI로 1회성 정적 파일만 만들 수도, 서버로 띄워서
+# 버튼 클릭마다 다시 읽어오게 할 수도 있다.
+#
+# 사용 예시:
+#     python inspect_dataset.py
+#     python inspect_dataset.py --root gs://qi-ucsd-speech-us/curated
+#     python inspect_dataset.py --root ../curated --classes US UK IN KR
+#
+# 실시간 대시보드(수동 재실행 없이 버튼으로 갱신):
+#     python serve_dataset_report.py
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime
+import io
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")  # 화면 출력 없는 환경(서버/CI)에서도 그림을 그릴 수 있도록 백엔드 고정
+import matplotlib.pyplot as plt
+import pandas as pd
+
+DEFAULT_ROOT = "gs://qi-ucsd-speech-us/curated"
+DEFAULT_CLASSES = ["US", "UK", "IN", "NG", "CA", "JP", "CN", "AU", "KR"]
+# 최종 HTML 리포트가 저장될 기본 경로 (classifier/reports/dataset_report.html)
+# 이 파일은 classifier/src/dashboard/ 아래에 있으므로 3단계 위가 classifier/.
+REPORT_OUT = Path(__file__).resolve().parent.parent.parent / "reports" / "dataset_report.html"
+
+_gcs_client = None  # lazy-init — Cloud Run/로컬 모두 google-cloud-storage 하나로 통일
+
+
+def _gcs():
+    # google-cloud-storage 클라이언트를 지연 생성한다. 인증은 ADC(Application
+    # Default Credentials)를 쓴다: Cloud Run에서는 서비스 계정으로 자동 처리되고,
+    # 로컬에서는 `gcloud auth application-default login` 한 번이면 된다.
+    global _gcs_client
+    if _gcs_client is None:
+        from google.cloud import storage
+
+        _gcs_client = storage.Client()
+    return _gcs_client
+
+
+def read_manifest(root: str, cc: str) -> pd.DataFrame | None:
+    # 특정 클래스(국가 코드, 예: "US")의 manifest.csv를 읽어온다.
+    # root가 gs:// 로 시작하면 google-cloud-storage로 읽고, 로컬 경로면
+    # 그냥 파일을 연다. 파일이 없으면 None을 반환.
+    path = f"{root.rstrip('/')}/{cc}/manifest.csv"
+    if root.startswith("gs://"):
+        bucket_name, _, prefix = root[len("gs://"):].partition("/")
+        blob_path = f"{prefix}/{cc}/manifest.csv" if prefix else f"{cc}/manifest.csv"
+        blob = _gcs().bucket(bucket_name).blob(blob_path)
+        if not blob.exists():
+            print(f"  ! {cc}: no manifest at {path}")
+            return None
+        return pd.read_csv(io.StringIO(blob.download_as_text()))
+    local = Path(path)
+    if not local.exists():
+        print(f"  ! {cc}: no manifest at {local}")
+        return None
+    return pd.read_csv(local)
+
+
+def collect_manifests(root: str, classes: list[str]) -> dict[str, pd.DataFrame]:
+    # classes에 있는 모든 클래스의 manifest.csv를 읽어 {클래스: DataFrame} 딕셔너리로 모은다.
+    # 서버 모드에서 "새로고침" 버튼을 누를 때마다 이 함수가 다시 호출된다.
+    print(f"Reading manifests from {root} ...")
+    dfs: dict[str, pd.DataFrame] = {}
+    for cc in classes:
+        df = read_manifest(root, cc)
+        if df is not None and len(df):
+            dfs[cc] = df
+            print(f"  {cc}: {len(df)} clips, {df['speaker'].nunique()} speakers")
+    return dfs
+
+
+def fig_to_data_uri(fig: plt.Figure) -> str:
+    # matplotlib Figure를 PNG로 렌더링한 뒤 base64로 인코딩해 data URI로 변환.
+    # 이렇게 하면 별도 이미지 파일 없이 HTML 하나에 모든 차트를 임베드할 수 있다.
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=110)
+    plt.close(fig)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def chart_clips_per_class(dfs: dict[str, pd.DataFrame]) -> str:
+    # 클래스(억양)별 클립 개수를 막대그래프로 표시.
+    fig, ax = plt.subplots(figsize=(6, 4))
+    classes = list(dfs.keys())
+    counts = [len(dfs[c]) for c in classes]
+    ax.bar(classes, counts, color="#4C78A8")
+    for i, v in enumerate(counts):
+        ax.text(i, v, str(v), ha="center", va="bottom")
+    ax.set_ylabel("clips")
+    ax.set_title("Clips per class")
+    return fig_to_data_uri(fig)
+
+
+def chart_speakers_per_class(dfs: dict[str, pd.DataFrame]) -> str:
+    # 클래스별 고유 화자(speaker) 수를 막대그래프로 표시.
+    fig, ax = plt.subplots(figsize=(6, 4))
+    classes = list(dfs.keys())
+    counts = [dfs[c]["speaker"].nunique() for c in classes]
+    ax.bar(classes, counts, color="#72B7B2")
+    for i, v in enumerate(counts):
+        ax.text(i, v, str(v), ha="center", va="bottom")
+    ax.set_ylabel("unique speakers")
+    ax.set_title("Speakers per class")
+    return fig_to_data_uri(fig)
+
+
+def chart_source_breakdown(dfs: dict[str, pd.DataFrame]) -> str:
+    # 클래스별로 데이터 출처(source, 예: Common Voice/자체수집 등) 비중을
+    # 누적 막대그래프(stacked bar)로 표시.
+    all_sources = sorted({s for df in dfs.values() for s in df["source"].unique()})
+    fig, ax = plt.subplots(figsize=(7, 4))
+    classes = list(dfs.keys())
+    bottom = [0] * len(classes)
+    colors = plt.get_cmap("tab10").colors
+    for i, source in enumerate(all_sources):
+        vals = [int((dfs[c]["source"] == source).sum()) for c in classes]
+        ax.bar(classes, vals, bottom=bottom, label=source, color=colors[i % len(colors)])
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    ax.set_ylabel("clips")
+    ax.set_title("Clips per class by source")
+    ax.legend(fontsize=8)
+    return fig_to_data_uri(fig)
+
+
+def chart_gender_balance(dfs: dict[str, pd.DataFrame]) -> str:
+    # 클래스별 성별(F/M/미상 U) 분포를 누적 막대그래프로 표시.
+    fig, ax = plt.subplots(figsize=(7, 4))
+    classes = list(dfs.keys())
+    genders = ["F", "M", "U"]
+    colors = {"F": "#E45756", "M": "#4C78A8", "U": "#B0B0B0"}
+    bottom = [0] * len(classes)
+    for g in genders:
+        vals = [int((dfs[c]["gender"] == g).sum()) for c in classes]
+        if not any(vals):
+            continue
+        ax.bar(classes, vals, bottom=bottom, label=g, color=colors[g])
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    ax.set_ylabel("clips")
+    ax.set_title("Gender balance per class")
+    ax.legend()
+    return fig_to_data_uri(fig)
+
+
+def build_summary_table(dfs: dict[str, pd.DataFrame]) -> str:
+    # 클래스별 요약 통계(클립 수, 화자 수, 성비, 출처 분포)를 HTML 표로 생성.
+    rows = []
+    for cc, df in dfs.items():
+        clips = len(df)
+        speakers = df["speaker"].nunique()
+        f = int((df["gender"] == "F").sum())
+        m = int((df["gender"] == "M").sum())
+        sources = ", ".join(f"{s}={n}" for s, n in df["source"].value_counts().items())
+        rows.append(f"<tr><td>{cc}</td><td>{clips}</td><td>{speakers}</td>"
+                     f"<td>{f} / {m}</td><td>{sources}</td></tr>")
+    return (
+        "<table><thead><tr><th>Class</th><th>Clips</th><th>Speakers</th>"
+        "<th>F / M</th><th>Sources</th></tr></thead><tbody>"
+        + "".join(rows) + "</tbody></table>"
+    )
+
+
+# 리포트 "본문" 템플릿(표 + 차트). 정적 HTML 파일에도, 서버 모드의 새로고침
+# 응답(innerHTML 교체)에도 그대로 재사용된다.
+BODY_TEMPLATE = """<p class="meta">Source root: <code>{root}</code> &middot; generated {generated}</p>
+{table}
+<div class="charts">
+<img src="{c1}">
+<img src="{c2}">
+<img src="{c3}">
+<img src="{c4}">
+</div>
+"""
+
+# 정적 파일용 페이지 전체 템플릿(<html>/<head> 포함). 서버 모드는 자체 페이지에
+# render_body()의 결과만 끼워 넣으므로 이 템플릿을 쓰지 않는다.
+PAGE_TEMPLATE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Dataset report</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #222; }}
+h1 {{ margin-bottom: 0; }}
+.meta {{ color: #666; margin-top: 0.2rem; }}
+table {{ border-collapse: collapse; margin: 1.5rem 0; }}
+th, td {{ border: 1px solid #ccc; padding: 0.4rem 0.8rem; text-align: left; }}
+th {{ background: #f2f2f2; }}
+.charts {{ display: flex; flex-wrap: wrap; gap: 1.5rem; }}
+.charts img {{ max-width: 100%; border: 1px solid #ddd; }}
+</style></head>
+<body>
+<h1>Curated dataset report</h1>
+{body}
+</body></html>
+"""
+
+
+def render_body(root: str, dfs: dict[str, pd.DataFrame]) -> str:
+    """Table + charts only — no <html>/<head> wrapper. Shared by CLI and server."""
+    return BODY_TEMPLATE.format(
+        root=root,
+        generated=datetime.datetime.now().isoformat(timespec="seconds"),
+        table=build_summary_table(dfs),
+        c1=chart_clips_per_class(dfs),
+        c2=chart_speakers_per_class(dfs),
+        c3=chart_source_breakdown(dfs),
+        c4=chart_gender_balance(dfs),
+    )
+
+
+def build_report_html(root: str, dfs: dict[str, pd.DataFrame]) -> str:
+    """Full standalone HTML page — used for the static file output."""
+    return PAGE_TEMPLATE.format(body=render_body(root, dfs))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--root", default=DEFAULT_ROOT, help="curated/ root (gs:// URI or local dir)")
+    ap.add_argument("--classes", nargs="+", default=DEFAULT_CLASSES)
+    ap.add_argument("--out", type=Path, default=REPORT_OUT)
+    args = ap.parse_args()
+
+    dfs = collect_manifests(args.root, args.classes)
+    if not dfs:
+        # 읽어들인 매니페스트가 하나도 없으면 리포트를 만들 수 없으므로 즉시 중단.
+        raise SystemExit("No manifests found — check --root and --classes.")
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(build_report_html(args.root, dfs), encoding="utf-8")
+    print(f"wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()

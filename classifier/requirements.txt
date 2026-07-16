@@ -1,0 +1,34 @@
+# Accent classifier dependencies.
+#
+# torch / torchaudio are installed separately so the build matches your CUDA:
+#   - Locally (GPU):
+#       pip install torch==2.4.1 torchaudio==2.4.1 \
+#           --index-url https://download.pytorch.org/whl/cu121
+#   - On Vertex AI: the Dockerfile's base image already bundles a CUDA torch,
+#     and installs a matching torchaudio.
+#
+# Everything below is torch-version independent.
+# Pinned: transformers >=4.48 refuses torch.load of non-safetensors checkpoints
+# unless torch>=2.6 (CVE-2025-32434). The base image ships torch 2.4.1 and the
+# facebook/wav2vec2-base backbone is distributed as pytorch_model.bin, so we pin
+# to a version that predates that check. Bump this once torch is upgraded to 2.6+.
+transformers==4.44.2
+accelerate==0.33.0
+safetensors>=0.4
+# audio decoding / resampling (Common Voice ships mp3)
+soundfile>=0.12
+librosa>=0.10
+# metrics
+scikit-learn>=1.5
+# data
+pandas>=2.2
+numpy>=1.26
+# infer.py --plot: Level 2 frame-level heatmap
+matplotlib>=3.8
+# train.py: streams loss/accuracy/F1 curves to Vertex AI TensorBoard.
+# gcsfs lets the TensorBoard SummaryWriter write straight to the gs:// path
+# Vertex injects via AIP_TENSORBOARD_LOG_DIR (not FUSE-mounted like the dataset).
+tensorboard>=2.17
+gcsfs>=2024.6
+# serve_dataset_report.py: local dataset dashboard with a refresh button
+flask>=3.0

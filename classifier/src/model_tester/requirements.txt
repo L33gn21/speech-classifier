@@ -1,0 +1,16 @@
+# Model-tester deps. Heavier than the dataset dashboard (torch/transformers)
+# because inference runs here — kept as a SEPARATE Cloud Run service so the
+# dataset dashboard image stays small.
+#
+# torch is installed separately (CPU-only wheel) in the Dockerfile to keep the
+# image small; everything below is torch-version independent.
+#
+# transformers pinned to match training (classifier/requirements.txt): >=4.48
+# refuses torch.load of non-safetensors under torch<2.6. We only load
+# safetensors here, but staying on the trained-with version avoids surprises.
+transformers==4.44.2
+safetensors>=0.4
+numpy>=1.26
+flask>=3.0
+gunicorn>=22.0
+google-cloud-storage>=2.18

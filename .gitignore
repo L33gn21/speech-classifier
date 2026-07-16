@@ -12,6 +12,9 @@ env/
 
 # Generated outputs (outputs/classifier, outputs/detector, ...)
 /outputs/
+# classifier/reports/ holds human-written work reports (tracked). Only the
+# generated dataset audit HTML (inspect_dataset.py) is ignored:
+classifier/reports/*.html
 
 # Python cache
 __pycache__/
@@ -32,6 +35,8 @@ htmlcov/
 .env
 .env.*
 !.env.example
+# gcloud project values (copied from env.example.sh)
+classifier/gcloud/env.sh
 
 # OS files
 .DS_Store
