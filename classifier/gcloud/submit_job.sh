@@ -6,13 +6,33 @@
 # Any args after the script are forwarded to train.py, e.g.:
 #   ./submit_job.sh --epochs=8 --batch-size=8 --grad-accum=2
 #   ./submit_job.sh --unfreeze-top=4 --lr=2e-5 --epochs=6
+#
+# --auto-register (script flag, NOT forwarded to train.py): after submitting,
+# poll the job until it finishes and, on success, register the resulting model
+# dir into the Vertex AI Model Registry via register_model.sh. This BLOCKS until
+# the job completes (can be hours) — run it in the background if you prefer:
+#   ./submit_job.sh --auto-register --epochs=8 &
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "${HERE}/env.sh"
 
+# Split our own flags out of the args destined for train.py.
+# --auto-register is consumed here; everything else is forwarded unchanged.
+AUTO_REGISTER=0
+FILTERED=()
+for a in "$@"; do
+  case "$a" in
+    --auto-register) AUTO_REGISTER=1 ;;
+    *) FILTERED+=("$a") ;;
+  esac
+done
+set -- ${FILTERED[@]+"${FILTERED[@]}"}
+
 gcloud config set project "${PROJECT_ID}"
 
-JOB_NAME="accent-classifier-$(date +%Y%m%d-%H%M%S)"
+# JOB_SUFFIX (optional env): appended to the job name so a sweep can label each
+# run, e.g. JOB_SUFFIX=lr5e5-uf4 ./submit_job.sh ...  ->  accent-classifier-<ts>-lr5e5-uf4
+JOB_NAME="accent-classifier-$(date +%Y%m%d-%H%M%S)${JOB_SUFFIX:+-${JOB_SUFFIX}}"
 # curated 풀(DATASET.md)을 데이터 소스로 사용. 컨테이너 안에서 train.py 가
 # 이 매니페스트들을 읽어 화자 단위 train/val/test 분할을 직접 만든다.
 CURATED_ROOT="gs://${BUCKET}/curated"
@@ -73,11 +93,39 @@ if [ -n "${TB_YAML}" ]; then
 fi
 echo "   args       :" "$@"
 
-gcloud ai custom-jobs create \
+if [ "${AUTO_REGISTER}" -eq 1 ]; then
+  echo "   auto-register: ON (will register on success)"
+fi
+
+# Capture the created job's resource name so we can poll its state below.
+JOB_ID="$(gcloud ai custom-jobs create \
   --region="${REGION}" \
   --display-name="${JOB_NAME}" \
-  --config="${CONFIG}"
+  --config="${CONFIG}" \
+  --format="value(name)")"
 
 rm -f "${CONFIG}"
-echo ">> submitted. Track it:"
-echo "   gcloud ai custom-jobs list --region=${REGION}"
+echo ">> submitted: ${JOB_ID}"
+echo "   track it:  gcloud ai custom-jobs list --region=${REGION}"
+
+if [ "${AUTO_REGISTER}" -ne 1 ]; then
+  exit 0
+fi
+
+# --- auto-register: wait for completion, then register on success -----------
+echo ">> --auto-register: polling until the job finishes (this can take hours)..."
+while true; do
+  STATE="$(gcloud ai custom-jobs describe "${JOB_ID}" \
+    --region="${REGION}" --format="value(state)")"
+  echo "   $(date +%H:%M:%S)  state=${STATE}"
+  case "${STATE}" in
+    JOB_STATE_SUCCEEDED)
+      echo ">> job succeeded — registering ${JOB_NAME} to Model Registry"
+      "${HERE}/register_model.sh" "${JOB_NAME}"
+      break ;;
+    JOB_STATE_FAILED|JOB_STATE_CANCELLED|JOB_STATE_EXPIRED)
+      echo ">> job ended in ${STATE} — NOT registering." >&2
+      exit 1 ;;
+  esac
+  sleep 60
+done

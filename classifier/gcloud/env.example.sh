@@ -20,6 +20,12 @@ export MACHINE_TYPE="n1-standard-8"
 export ACCELERATOR_TYPE="NVIDIA_TESLA_T4"   # or NVIDIA_L4 (needs g2-standard-* machine)
 export ACCELERATOR_COUNT="1"
 
+# --- Vertex AI Model Registry (register_model.sh) ---------------------------
+# Catalog/versioning of trained artifacts. Both have script defaults; override
+# only if you want a different registry name or a real (custom) serving image.
+# export MODEL_DISPLAY_NAME="accent-classifier"   # groups versions in the registry
+# export SERVING_IMAGE="..."                       # custom serving container (for deploy)
+
 # --- Vertex AI TensorBoard ---------------------------------------------------
 # Create once with: gcloud ai tensorboards create --display-name=speech-classifier --region=${REGION}
 # then paste the returned resource name below. Leave empty to submit jobs

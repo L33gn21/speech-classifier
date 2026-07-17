@@ -36,13 +36,20 @@ import json
 import os
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
     f1_score,
     precision_recall_fscore_support,
 )
-from transformers import Trainer, TrainingArguments, Wav2Vec2FeatureExtractor
+from transformers import (
+    EarlyStoppingCallback,
+    Trainer,
+    TrainingArguments,
+    Wav2Vec2FeatureExtractor,
+)
 
 from config import (
     CURATED_ROOT,
@@ -108,15 +115,86 @@ def detailed_report(preds: np.ndarray, labels: np.ndarray) -> dict:
     return {"labels": LABELS, "per_class": per_class, "confusion_matrix": cm.tolist()}
 
 
+def compute_class_weights(train_df, scheme: str):
+    """Per-class loss weights from the *train* split label counts.
+
+    Kept out of the model so the saved state_dict is unchanged (evaluate.py /
+    infer.py / model_tester reload identical weights). All schemes renormalize
+    to mean weight ~= 1 (so the effective learning rate is unchanged):
+      - ``balanced``: w ∝ 1/count — full inverse-frequency (equals sklearn's
+        "balanced"). Fully compensates the imbalance; strongest push on CN.
+      - ``sqrt``: w ∝ 1/sqrt(count) — tempered; a gentler middle ground that
+        lifts minority classes without over-emphasizing the rarest one.
+    Returns None for ``none`` (plain, unweighted cross-entropy).
+    """
+    # 학습(train) 분할의 클래스별 클립 수로부터 손실 가중치를 만든다. 모델이 아니라
+    # 여기(WeightedTrainer)에만 얹으므로 저장되는 가중치(state_dict)는 그대로 유지되어
+    # evaluate.py / infer.py / model_tester 가 동일하게 로드된다. CN(최소 클래스) 등
+    # 소수 클래스의 손실 기여를 키워 macro-F1·소수 클래스 recall 을 끌어올린다.
+    if scheme == "none":
+        return None
+    counts = (
+        train_df["label"].value_counts().reindex(range(len(LABELS)), fill_value=0)
+        .to_numpy(dtype=np.float64)
+    )
+    counts = np.clip(counts, 1.0, None)  # avoid div-by-zero for an empty class
+    if scheme == "balanced":
+        w = 1.0 / counts                 # full inverse-frequency
+    elif scheme == "sqrt":
+        w = 1.0 / np.sqrt(counts)        # tempered — gentler on the rarest class
+    else:
+        raise ValueError(f"unknown class-weight scheme: {scheme}")
+    w = w * (len(LABELS) / w.sum())  # normalize so mean weight ~= 1
+    return torch.tensor(w, dtype=torch.float32)
+
+
+class WeightedTrainer(Trainer):
+    """HF Trainer with an optional class-weighted cross-entropy loss.
+
+    The model's ``forward`` still returns its own (unweighted) loss, but the
+    Trainer selects the loss via ``compute_loss`` — so we recompute a weighted
+    cross-entropy from the logits here and ignore the model's. This keeps the
+    weighting entirely on the training side; nothing about the saved model
+    changes. ``class_weights=None`` reproduces the previous plain-CE behavior.
+    """
+    # 클래스 가중 교차엔트로피를 적용하는 Trainer. 모델의 forward 는 여전히 자체
+    # (비가중) 손실을 계산하지만, Trainer 는 compute_loss 로 손실을 고른다 — 여기서
+    # 로짓으로부터 가중 CE 를 다시 계산해 그것을 쓴다. 가중치는 학습 쪽에만 존재하고
+    # 저장 모델은 그대로다. class_weights=None 이면 기존 plain-CE 와 동일.
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._class_weights = class_weights
+
+    # num_items_in_batch / **kwargs: transformers>=4.46 passes extra kwargs to
+    # compute_loss. We pin 4.44.2 (which doesn't), but accept-and-ignore them so
+    # a future pin bump can't silently break the training step.
+    def compute_loss(self, model, inputs, return_outputs=False,
+                     num_items_in_batch=None, **kwargs):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+        weight = None
+        if self._class_weights is not None:
+            weight = self._class_weights.to(logits.device)
+        loss = F.cross_entropy(logits, labels, weight=weight)
+        return (loss, outputs) if return_outputs else loss
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=float, default=8.0)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--grad-accum", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--warmup-ratio", type=float, default=0.1)
-    ap.add_argument("--weight-decay", type=float, default=0.01)
-    ap.add_argument("--unfreeze-top", type=int, default=0,
+    # Underscore aliases (--warmup_ratio, --weight_decay, --unfreeze_top) are added
+    # so Vertex AI Vizier — which injects each trial's params as --<parameterId>=v
+    # with underscores — matches these flags without a separate mapping.
+    ap.add_argument("--warmup-ratio", "--warmup_ratio", dest="warmup_ratio",
+                    type=float, default=0.1)
+    ap.add_argument("--weight-decay", "--weight_decay", dest="weight_decay",
+                    type=float, default=0.01)
+    ap.add_argument("--unfreeze-top", "--unfreeze_top", dest="unfreeze_top",
+                    type=int, default=0,
                     help="unfreeze top N transformer layers (0 = head only)")
                     # 상위 N개 트랜스포머 레이어를 학습 가능하게 해제 (0이면 헤드만 학습)
     ap.add_argument("--gradient-checkpointing", action="store_true")
@@ -128,6 +206,23 @@ def main() -> None:
     ap.add_argument("--test-fraction", type=float, default=TEST_FRACTION)
     ap.add_argument("--no-fp16", action="store_true")
     # 기본은 fp16(반정밀도) 학습, 이 플래그로 비활성화 가능 (예: CPU 학습 시).
+    ap.add_argument("--class-weight", "--class_weight", dest="class_weight",
+                    choices=["none", "balanced", "sqrt"], default="balanced",
+                    help="per-class loss weighting: none | balanced (1/count) | "
+                         "sqrt (tempered) (default: balanced)")
+    # 클래스 불균형(US/UK/CA ~6k vs CN ~1.17k)을 손실 가중치로 흡수한다.
+    ap.add_argument("--dropout", type=float, default=0.1,
+                    help="classifier head dropout")
+    ap.add_argument("--early-stopping-patience", type=int, default=3,
+                    help="stop if macro_f1 hasn't improved for N evals (0=disable)")
+    # macro-F1 이 N번 평가 동안 개선되지 않으면 조기 종료(0이면 비활성화).
+    ap.add_argument("--augment", action="store_true",
+                    help="light waveform augmentation (gain + noise) on the train split")
+    # 학습 분할에만 경량 파형 증강(랜덤 게인 + 가우시안 노이즈)을 적용해 채널
+    # confound(GLOBE vs SAA) 에 대한 강건성을 높인다.
+    ap.add_argument("--hypertune", action="store_true",
+                    help="report eval_macro_f1 to Vertex AI Vizier (HP tuning jobs)")
+    # Vertex AI Hyperparameter Tuning(Vizier) 잡에서 trial 점수를 보고할 때만 켠다.
     args = ap.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -162,12 +257,14 @@ def main() -> None:
     feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
     collator = DataCollator(feature_extractor)
 
-    train_ds = AccentDataset(train_df, curated_root=args.curated_root)
+    train_ds = AccentDataset(train_df, curated_root=args.curated_root,
+                             augment=args.augment)
     eval_ds = AccentDataset(val_df, curated_root=args.curated_root)
     test_ds = AccentDataset(test_df, curated_root=args.curated_root)
-    print(f"train={len(train_ds)}  val={len(eval_ds)}  test={len(test_ds)}")
+    print(f"train={len(train_ds)}  val={len(eval_ds)}  test={len(test_ds)}"
+          f"  augment={args.augment}")
 
-    model = AccentClassifier(MODEL_NAME)
+    model = AccentClassifier(MODEL_NAME, dropout=args.dropout)
     if args.unfreeze_top > 0:
         # 백본의 상위 N개 레이어까지 함께 파인튜닝하는 모드.
         model.unfreeze_top_layers(args.unfreeze_top)
@@ -234,13 +331,28 @@ def main() -> None:
         seed=SEED,
     )
 
-    trainer = Trainer(
+    # class-weighted loss: computed from the train split so it reflects the
+    # actual (post-undersampling) balance the model sees this run.
+    class_weights = compute_class_weights(train_df, args.class_weight)
+    if class_weights is not None:
+        print("class weights (%s): %s" % (
+            args.class_weight,
+            {LABELS[i]: round(float(class_weights[i]), 3) for i in range(len(LABELS))}))
+
+    callbacks = []
+    if args.early_stopping_patience and args.early_stopping_patience > 0:
+        callbacks.append(
+            EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience))
+
+    trainer = WeightedTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=collator,
         compute_metrics=compute_metrics,
+        class_weights=class_weights,
+        callbacks=callbacks,
     )
 
     trainer.train()
@@ -249,6 +361,21 @@ def main() -> None:
     val_out = trainer.predict(eval_ds, metric_key_prefix="eval")
     val_metrics = val_out.metrics
     print("final val eval:", json.dumps(val_metrics, indent=2))
+    # Vertex AI Hyperparameter Tuning(Vizier)에 이 trial 의 점수를 보고한다.
+    # --hypertune 일 때만, 그리고 cloudml-hypertune 이 설치돼 있을 때만 동작한다.
+    if args.hypertune:
+        try:
+            import hypertune
+
+            hpt = hypertune.HyperTune()
+            hpt.report_hyperparameter_tuning_metric(
+                hyperparameter_metric_tag="macro_f1",
+                metric_value=float(val_metrics.get("eval_macro_f1", 0.0)),
+            )
+            print("reported macro_f1 to hypertune:",
+                  val_metrics.get("eval_macro_f1"))
+        except Exception as e:  # noqa: BLE001 — never fail the job over reporting
+            print("hypertune report skipped:", e)
     # 학습에 전혀 쓰이지 않은 홀드아웃 test 셋으로 최종 성능도 측정.
     test_out = trainer.predict(test_ds, metric_key_prefix="test")
     test_metrics = test_out.metrics

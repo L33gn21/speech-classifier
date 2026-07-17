@@ -1,0 +1,47 @@
+{
+  "_comment": "5k-scale rebuild (2026-07-16): US UK CA AU IN targeted at ~5,000 clips each; CN takes all it has (~1.2k floor, Hong Kong English is the only GLOBE CN source). GLOBE speakers are the real lever: at cap<=15 the big-5 averaged ~7 clips/speaker (heavy right-skew, whales rarely sampled), so reaching 5,000 needs ~700 GLOBE speakers/class, not more clips/speaker. globe_speakers_per_gender raised 100->380 (=760/class), clips/speaker 15->20. IN is speaker-limited (only 540 GLOBE speakers exist) so it lands lower (~4k); imbalance absorbed by macro-F1 + class weighting in training. Hybrid label axis unchanged (region classes -> SAA country, CN(L2) -> SAA native_language).",
+  "axis": "country",
+  "seed": 42,
+  "globe_speakers_per_gender": 380,
+  "globe_clips_per_speaker": 20,
+  "saa_speakers_per_gender": 40,
+  "classes": {
+    "US": {
+      "globe_accents": ["United States English"],
+      "saa_by": "country",
+      "saa_countries": ["usa"],
+      "saa_languages": []
+    },
+    "UK": {
+      "globe_accents": ["England English", "Scottish English", "Welsh English"],
+      "saa_by": "country",
+      "saa_countries": ["uk"],
+      "saa_languages": []
+    },
+    "CA": {
+      "globe_accents": ["Canadian English"],
+      "saa_by": "country",
+      "saa_countries": ["canada"],
+      "saa_languages": []
+    },
+    "AU": {
+      "globe_accents": ["Australian English"],
+      "saa_by": "country",
+      "saa_countries": ["australia"],
+      "saa_languages": []
+    },
+    "IN": {
+      "globe_accents": ["India and South Asia (India, Pakistan, Sri Lanka)"],
+      "saa_by": "country",
+      "saa_countries": ["india", "pakistan"],
+      "saa_languages": []
+    },
+    "CN": {
+      "globe_accents": ["Hong Kong English"],
+      "globe_clips_per_speaker": 200,
+      "saa_by": "language",
+      "saa_countries": [],
+      "saa_languages": ["mandarin", "cantonese"]
+    }
+  }
+}

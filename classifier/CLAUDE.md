@@ -49,6 +49,40 @@
 
 ---
 
+## 1.5 현재 최고 모델 & 다음 작업 (핸드오프 — 새 세션은 여기부터)
+
+> 이어받는 세션(사람/AI)이 **바로 재현·발전**할 수 있게 남기는 현재 상태.
+> 상세 근거는 `reports/`(최신순 색인 `reports/README.md`)를 읽는다.
+
+- **현재 최고 모델: v2 (전체 파인튜닝).** Model Registry `accent-classifier` **v2** (us-central1).
+  - 산출물: `gs://qi-ucsd-speech-usc1/outputs/classifier/accent-classifier-20260717-082914-v2final/model/`
+  - 성능(내부 화자분리 test): **macro-F1 0.608 / acc 0.620**. 미지 코퍼스 **VoxForge acc 0.704 / 5클래스 macro-F1 0.706**. 클래스별·비교는 `reports/2026-07-17-production-training-v2-fullft.md`.
+  - **재현 레시피** (컨테이너 최신 상태에서): 
+    ```bash
+    cd gcloud && ./build_and_push.sh   # 코드 바꿨으면 먼저 재빌드
+    JOB_SUFFIX=v3 ./submit_job.sh --auto-register \
+      --unfreeze-top=12 --lr=3e-5 --class-weight=balanced \
+      --warmup-ratio=0.15 --per-class=5000 --epochs=10 \
+      --early-stopping-patience=3 --augment
+    ```
+- **⚠️ 현재 컴퓨트/데이터는 임시로 us-central1**(env.sh: `REGION=us-central1`,
+  `BUCKET=qi-ucsd-speech-usc1`). us-west2 T4 재고 복귀 시 되돌린다. §1 표는 원 홈(us-west2)
+  기준이니 **env.sh가 소스 오브 트루스**.
+- **학습 방법론(검증됨):** ① 짧은 프록시 스윕(`sweep.sh`, `--per-class 1500 --epochs 3~4`)으로
+  구조(unfreeze/lr/class-weight) 결정 → ② 승자로 전량 정식 학습. 전체 파인튜닝(uf12)이
+  부분 unfreeze(uf4)를 확실히 상회했고 소수 클래스(CN)도 더 잘 잡았다.
+- **다음 개선 후보 (우선순위):**
+  1. **CN recall↑** — 현재 정밀 높고 재현 낮음. 근본책은 SpeechOcean762(본토 만다린) raw
+     인제스트로 CN 데이터 확충(`DATASET.md` §5). 임시로 `--class-weight sqrt`/임계값 실험.
+  2. **US↔CA 혼동** 완화(북미권) — 추가 데이터/피처.
+  3. **HP 정밀 탐색** — `submit_hp_tuning_job.sh`(Vertex Vizier, `train.py --hypertune`
+     연동 완료)로 weight_decay·warmup·dropout·lr 자동 최적화(비용=trial수×학습).
+- **튜닝 가능한 인자**는 `train.py` argparse에 노출: `--lr --unfreeze-top --class-weight
+  {none,balanced,sqrt} --dropout --warmup-ratio --weight-decay --epochs
+  --early-stopping-patience --augment --per-class`. 상세는 `docs/hyperparameter-tuning.md`.
+
+---
+
 ## 2. 데이터셋 다운로드 규칙 (VM → 버킷 직접)
 
 새 데이터 소스를 버킷에 추가할 때:
@@ -102,6 +136,9 @@ gcloud ai custom-jobs list --region=us-west2            # 진행 추적
 
 - 데이터 소스는 `submit_job.sh`가 `CV_CURATED_ROOT=gs://.../curated`로 주입한다.
   `config.py`가 `gs://` → `/gcs/` FUSE 경로로 자동 변환한다.
+- `--auto-register`를 붙이면(`./submit_job.sh --auto-register --epochs=8`) 잡 완료까지
+  대기했다가 성공 시 `register_model.sh`로 Model Registry에 자동 등록한다. 완료까지
+  블록되므로(수 시간 가능) 백그라운드(`&`)로 돌려도 된다. 실패/취소면 등록하지 않는다.
 - 산출물 확인/다운로드:
   ```bash
   gcloud storage cp -r "gs://qi-ucsd-speech-usw2/outputs/classifier/<JOB>/model" ./trained_model
@@ -155,4 +192,5 @@ https://console.cloud.google.com/vertex-ai/experiments/tensorboard-instances?pro
 | `gcloud/env.sh` | 프로젝트·버킷·머신 값 (gitignore) |
 | `gcloud/build_and_push.sh` | 이미지 빌드 → Artifact Registry |
 | `gcloud/submit_job.sh` | Vertex Custom Job 제출 (T4) |
+| `gcloud/register_model.sh` | 학습 산출물(GCS) → Model Registry 등록 (카탈로그/버전관리) |
 | `gcloud/check_data.sh` | 버킷 curated 풀 사전점검 (업로드 단계는 없음, §2) |

@@ -114,6 +114,8 @@ python infer.py clip.mp3 --model-dir ../trained_model
 
 옵션·선택 근거(왜 Custom Training인지, GPU 종류 비교 등)는
 [`docs/vertex-ai-options.md`](./docs/vertex-ai-options.md) 참고.
+GCP 구성 요소와 데이터·학습·서비스 흐름을 한 장으로 보려면
+[`docs/gcp-architecture.md`](./docs/gcp-architecture.md)를 참고.
 
 ---
 

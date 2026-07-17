@@ -91,7 +91,7 @@ HP Tuning Job으로 승격 가능(코드 거의 그대로).
 | 옵션 | 설명 | 이 프로젝트 |
 |---|---|---|
 | GCS에 산출물만 저장 | 모델 파일을 버킷에 두고 필요 시 다운로드 | ✅ 현재 `AIP_MODEL_DIR`가 이걸 함 |
-| **Model Registry 등록** | 버전 관리 | 선택 |
+| **Model Registry 등록** | 버전 관리 | 선택 — `gcloud/register_model.sh` (카탈로그/버전관리용). 이 커스텀 모델은 prebuilt 서빙 컨테이너로 배포 불가라, 실제 서빙엔 infer.py를 감싼 커스텀 서빙 컨테이너가 별도로 필요 |
 | **Endpoint 배포** | 상시 REST API로 실시간 추론 | 서빙 필요할 때 |
 | **Batch Prediction** | 대량 파일 한 번에 추론 | 오프라인 대량 처리 시 |
 

@@ -49,7 +49,7 @@ from functools import wraps
 
 from flask import Flask, jsonify, redirect, request, session, url_for
 
-from inspect_dataset import DEFAULT_CLASSES, DEFAULT_ROOT, collect_manifests, render_body
+from inspect_dataset import DEFAULT_CLASSES, DEFAULT_ROOT, SHARED_STYLE, collect_manifests, render_body
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
@@ -70,21 +70,30 @@ def login_required(view):
 
 
 LOGIN_PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Login — Dataset dashboard</title>
-<style>
-body {{ font-family: system-ui, sans-serif; margin: 0; height: 100vh; display: flex;
-       align-items: center; justify-content: center; background: #f5f5f5; color: #222; }}
-form {{ background: #fff; padding: 2rem 2.5rem; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.15);
-        display: flex; flex-direction: column; gap: 0.8rem; min-width: 260px; }}
-h1 {{ font-size: 1.2rem; margin: 0 0 0.5rem; }}
-input {{ padding: 0.5rem 0.6rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }}
-button {{ padding: 0.5rem; font-size: 1rem; cursor: pointer; border: none; border-radius: 4px;
-          background: #2563eb; color: #fff; }}
-.error {{ color: #c00; margin: 0; }}
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login — Dataset dashboard</title>
+<style>""" + SHARED_STYLE + """
+body {{ display: flex; align-items: center; justify-content: center; padding: 1.5rem; }}
+.login-card {{ padding: 2.4rem 2.6rem; min-width: 300px; display: flex; flex-direction: column; gap: 1rem; }}
+.login-badge {{ width: 40px; height: 40px; border-radius: 11px; display: flex; align-items: center;
+                justify-content: center; font-size: 1.2rem;
+                background: linear-gradient(135deg, var(--accent), var(--accent-2)); }}
+.login-card h1 {{ font-size: 1.15rem; margin: .2rem 0 0; }}
+.login-card p {{ margin: 0; color: var(--muted); font-size: .85rem; }}
+input {{ padding: .65rem .8rem; font-size: .95rem; border: 1px solid var(--border); border-radius: 8px;
+         background: var(--bg); color: var(--ink); outline: none; transition: border-color .15s; }}
+input:focus {{ border-color: var(--accent); }}
+button {{ padding: .65rem; font-size: .95rem; font-weight: 600; cursor: pointer; border: none; border-radius: 8px;
+          background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff;
+          box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--accent) 60%, transparent); }}
+button:hover {{ filter: brightness(1.06); }}
+.error {{ color: #ef4444; margin: 0; font-size: .85rem; }}
 </style></head>
 <body>
-<form method="post" action="/login">
-<h1>Dataset dashboard login</h1>
+<form class="card login-card" method="post" action="/login">
+<span class="login-badge">🎙️</span>
+<h1>Dataset dashboard</h1>
+<p>Sign in to view the curated speech-accent corpus.</p>
 {error}
 <input type="text" name="username" placeholder="Username" autofocus required>
 <input type="password" name="password" placeholder="Password" required>
@@ -141,31 +150,44 @@ def _regenerate() -> None:
 
 
 PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Dataset dashboard</title>
-<style>
-body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #222; }}
-h1 {{ margin-bottom: 0; display: inline-block; margin-right: 1rem; }}
-.meta {{ color: #666; margin-top: 0.2rem; }}
-table {{ border-collapse: collapse; margin: 1.5rem 0; }}
-th, td {{ border: 1px solid #ccc; padding: 0.4rem 0.8rem; text-align: left; }}
-th {{ background: #f2f2f2; }}
-tr.total td {{ font-weight: 700; background: #fafafa; border-top: 2px solid #999; }}
-.note {{ color: #888; font-size: 0.85rem; max-width: 640px; }}
-.cards {{ display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 1.2rem 0; }}
-.stat {{ background: #f7f9fc; border: 1px solid #e2e8f0; border-radius: 8px;
-         padding: 0.7rem 1.1rem; min-width: 92px; }}
-.stat-v {{ font-size: 1.35rem; font-weight: 700; color: #1e293b; }}
-.stat-k {{ font-size: 0.78rem; color: #64748b; text-transform: uppercase; letter-spacing: .03em; }}
-.charts {{ display: flex; flex-wrap: wrap; gap: 1.5rem; }}
-.charts img {{ max-width: 100%; border: 1px solid #ddd; }}
-#refresh {{ font-size: 1rem; padding: 0.4rem 1rem; cursor: pointer; }}
-#status {{ color: #666; margin-left: 0.5rem; }}
-.error {{ color: #c00; }}
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curated dataset dashboard</title>
+<style>""" + SHARED_STYLE + """
+.topbar {{ display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap;
+           gap: .8rem; margin-bottom: .3rem; }}
+.title-group {{ display: flex; align-items: center; gap: .7rem; }}
+.badge {{ width: 38px; height: 38px; border-radius: 10px; flex: none; display: flex; align-items: center;
+          justify-content: center; font-size: 1.05rem;
+          background: linear-gradient(135deg, var(--accent), var(--accent-2)); }}
+.actions {{ display: flex; align-items: center; gap: .7rem; }}
+#refresh {{ font-size: .88rem; font-weight: 600; padding: .5rem 1.1rem; cursor: pointer; border: none;
+            border-radius: 8px; color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--accent) 60%, transparent);
+            transition: filter .15s, transform .15s; }}
+#refresh:hover {{ filter: brightness(1.06); }}
+#refresh:disabled {{ opacity: .6; cursor: default; }}
+#refresh.spin::before {{ content: "↻ "; display: inline-block; animation: spin .8s linear infinite; }}
+@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+.logout-link {{ color: var(--muted); font-size: .85rem; text-decoration: none; border: 1px solid var(--border);
+                 border-radius: 8px; padding: .5rem .9rem; background: var(--surface); }}
+.logout-link:hover {{ color: var(--ink); border-color: var(--accent); }}
+#status {{ color: var(--muted); font-size: .82rem; display: block; margin: .3rem 0 1rem; }}
+.error {{ color: #ef4444; }}
 </style></head>
 <body>
-<h1>Curated dataset dashboard</h1>
-<button id="refresh">Refresh</button>
-<a href="/logout" style="margin-left: 1rem;">Log out</a>
+<div class="topbar">
+  <div class="title-group">
+    <span class="badge">🎙️</span>
+    <div>
+      <h1>Curated dataset dashboard</h1>
+      <p class="subtitle">Speech-accent corpus &middot; live from GCS</p>
+    </div>
+  </div>
+  <div class="actions">
+    <button id="refresh">Refresh</button>
+    <a class="logout-link" href="/logout">Log out</a>
+  </div>
+</div>
 <span id="status"></span>
 <div id="report">{body}</div>
 <script>
@@ -173,23 +195,25 @@ async function doRefresh() {{
   const status = document.getElementById('status');
   const btn = document.getElementById('refresh');
   btn.disabled = true;
-  status.textContent = 'refreshing...';
+  btn.classList.add('spin');
+  status.textContent = 'Refreshing…';
   status.className = '';
   try {{
     const res = await fetch('/refresh', {{ method: 'POST' }});
     const data = await res.json();
     if (data.ok) {{
       document.getElementById('report').innerHTML = data.body;
-      status.textContent = 'updated ' + data.generated;
+      status.textContent = 'Updated ' + data.generated;
     }} else {{
-      status.textContent = 'error: ' + data.error;
+      status.textContent = 'Error: ' + data.error;
       status.className = 'error';
     }}
   }} catch (e) {{
-    status.textContent = 'request failed: ' + e;
+    status.textContent = 'Request failed: ' + e;
     status.className = 'error';
   }} finally {{
     btn.disabled = false;
+    btn.classList.remove('spin');
   }}
 }}
 document.getElementById('refresh').onclick = doRefresh;

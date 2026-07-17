@@ -32,6 +32,8 @@
 
 | 날짜 | 보고서 | 요약 |
 |------|--------|------|
+| 2026-07-17 | [정식버전 학습 v2 (전체 파인튜닝)](./2026-07-17-production-training-v2-fullft.md) | v1 근거로 전체 파인튜닝(unfreeze-12, lr 3e-5) 채택. 내부 test macro-F1 0.545→0.608, VoxForge acc 0.617→0.704/5클래스 macro-F1 0.625→0.706, 전 클래스↑·CN 과예측 44→6 해소. Model Registry v2. register_model.sh 버그 3건 수정(auto-register 정상화). |
+| 2026-07-17 | [정식버전 학습 v1](./2026-07-17-production-training-v1.md) | 헤드-온리→백본 파인튜닝 전환. 클래스가중·early stopping·증강·hypertune 코드 추가, HP 스윕으로 lr 1e-4/unfreeze-4 선정. 내부 test macro-F1 0.437→0.545(+25%), VoxForge 미지 코퍼스 acc 0.617/5클래스 macro-F1 0.625. Model Registry v1 등록. register_model.sh 버그 2건 수정. |
 | 2026-07-16 | [curated 풀 5k 재구축](./2026-07-16-curated-5k-rebuild.md) | 클립 수 부족 해소: raw GLOBE 재고를 활용해 큐레이션 캡 상향(화자 100→380/성별, CN 클립캡 해제). curated 풀 8,129→28,237 클립(US/UK/CA ~6k, AU/IN ~4k, CN 1.17k 유지). 기존 풀은 `_archive/curated_v1_8k/`로 보존. TARGET_PER_CLASS 300→5000. |
 | 2026-07-16 | [대시보드 정보 확장](./2026-07-16-dashboard-metrics-enrichment.md) | 데이터셋 대시보드에 오디오 용량·평균 크기·추정 길이 추가(메타데이터만), 모델 테스터에 나라별 정확도/F1 막대 + 혼동 행렬 히트맵 추가. train.py가 상세 지표를 final_metrics.json에 저장. |
 | 2026-07-16 | [us-central1 정리 & 문서 최신화](./2026-07-16-us-central1-decommission.md) | us-west2 이전 완료에 따라 us-central1 스택(TensorBoard·Artifact·Cloud Run·Custom Job) 철거, 버킷만 보존. 문서 최신화 및 보고서 체계 신설. |
