@@ -9,6 +9,8 @@ env/
 
 # Data
 /data/
+# duration-EDA sampled clips (large local audio/CSV; gcloud-first — keep out of git)
+/.duration_sample/
 
 # Generated outputs (outputs/classifier, outputs/detector, ...)
 /outputs/

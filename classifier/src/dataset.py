@@ -55,20 +55,44 @@ def load_audio(path: Path) -> np.ndarray:
         return wav.astype(np.float32)
 
 
+def augment_waveform(wav: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Light, cheap train-time augmentation: random gain + occasional noise.
+
+    Applied only to the *train* split (never val/test). The goal is robustness
+    to the channel/recording confound (GLOBE clean-24kHz vs SAA mp3, DATASET.md
+    §5.1), not aggressive distortion — so gain stays mild and additive Gaussian
+    noise is injected at a fairly high SNR, half the time. Waveform-level (not
+    SpecAugment) so it composes with the Wav2Vec2 feature extractor downstream.
+    """
+    # 학습 분할에만 적용하는 가볍고 값싼 증강: 랜덤 게인 + 가끔 가우시안 노이즈.
+    # 채널/녹음 confound(GLOBE 24kHz vs SAA mp3)에 대한 강건성을 노리며, 과하지 않게
+    # 게인은 완만히, 노이즈는 비교적 높은 SNR로 절반 확률만 주입한다.
+    wav = wav * np.float32(rng.uniform(0.8, 1.2))          # random gain
+    if rng.random() < 0.5:                                  # additive noise (half the time)
+        rms = float(np.sqrt(np.mean(wav ** 2) + 1e-9))
+        snr_db = rng.uniform(15.0, 30.0)
+        noise_rms = rms / (10.0 ** (snr_db / 20.0))
+        wav = wav + rng.normal(0.0, noise_rms, size=wav.shape).astype(np.float32)
+    return wav.astype(np.float32)
+
+
 class AccentDataset(Dataset):
     def __init__(
         self,
         manifest: "str | Path | pd.DataFrame",
         curated_root: Path = CURATED_ROOT,
+        augment: bool = False,
     ):
         # manifest: filename,label,country[,speaker,source] 컬럼을 가진 CSV 경로이거나
         # 이미 로드된 DataFrame (prepare_data.build_splits 가 만든 train/val/test).
         # 오디오는 <curated_root>/<country>/audio/<filename> 에서 로드한다.
+        # augment: True 면 파형 증강을 적용한다(학습 분할에만 켤 것).
         if isinstance(manifest, pd.DataFrame):
             self.df = manifest.reset_index(drop=True)
         else:
             self.df = pd.read_csv(manifest)
         self.curated_root = Path(curated_root)
+        self.augment = augment
 
     def __len__(self) -> int:
         return len(self.df)
@@ -80,6 +104,10 @@ class AccentDataset(Dataset):
         if len(wav) > MAX_SAMPLES:
             wav = wav[:MAX_SAMPLES]  # crop long clips
             # 너무 긴 클립은 앞부분 MAX_SAMPLES(기본 8초)만 잘라서 사용한다.
+        if self.augment:
+            # default_rng() (seed 없음)는 OS 엔트로피로 초기화되어 DataLoader
+            # 워커/호출마다 독립적이다 — 증강은 재현성이 필요없다.
+            wav = augment_waveform(wav, np.random.default_rng())
         return {"waveform": wav, "label": int(row["label"])}
 
 

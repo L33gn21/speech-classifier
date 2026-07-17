@@ -1,0 +1,430 @@
+<title>Curated pool — clip duration EDA</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:        #f9f9f7;
+    --surface:     #fcfcfb;
+    --ink:         #0b0b0b;
+    --ink-2:       #52514e;
+    --ink-muted:   #898781;
+    --grid:        #e1e0d9;
+    --baseline:    #c3c2b7;
+    --accent:      #2a78d6;
+    --accent-soft: #cde2fb;
+    --border:      rgba(11,11,11,0.10);
+    --tag-bg:      #eef2f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:        #0d0d0d;
+      --surface:     #1a1a19;
+      --ink:         #ffffff;
+      --ink-2:       #c3c2b7;
+      --ink-muted:   #898781;
+      --grid:        #2c2c2a;
+      --baseline:    #383835;
+      --accent:      #3987e5;
+      --accent-soft: #17324f;
+      --border:      rgba(255,255,255,0.10);
+      --tag-bg:      #1f2a35;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --ink-muted:   #898781;
+    --grid:        #2c2c2a;
+    --baseline:    #383835;
+    --accent:      #3987e5;
+    --accent-soft: #17324f;
+    --border:      rgba(255,255,255,0.10);
+    --tag-bg:      #1f2a35;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 40px 24px 64px;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+  }
+
+  header { display: flex; flex-direction: column; gap: 8px; }
+  .eyebrow {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+  }
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    margin: 0;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+  .dek {
+    font-size: 15px;
+    color: var(--ink-2);
+    max-width: 62ch;
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .tile {
+    background: var(--surface);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .tile .label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+  }
+  .tile .value {
+    font-size: 24px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .tile .sub { font-size: 12.5px; color: var(--ink-2); }
+
+  section.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px 24px;
+  }
+  .card h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 2px;
+  }
+  .card .cap {
+    font-size: 12.5px;
+    color: var(--ink-muted);
+    margin: 0 0 14px;
+  }
+
+  .chart-scroll { overflow-x: auto; }
+
+  .grid-small {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+  }
+  .facet {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .facet-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .facet-head .cc { font-size: 13px; font-weight: 600; }
+  .facet-head .n { font-size: 11.5px; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+
+  svg text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .axis-label { fill: var(--ink-muted); font-size: 10px; }
+  .bar { fill: var(--accent); }
+  .bar:hover { fill: var(--ink); cursor: pointer; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--baseline); stroke-width: 1; }
+  .median-line { stroke: var(--ink-2); stroke-width: 1.5; stroke-dasharray: 3 3; }
+
+  .tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: var(--ink);
+    color: var(--page);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 6px 9px;
+    border-radius: 6px;
+    transform: translate(-50%, calc(-100% - 10px));
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity .1s ease;
+    z-index: 10;
+  }
+  .tooltip.show { opacity: 1; }
+  .tooltip b { font-variant-numeric: tabular-nums; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+  }
+  th, td {
+    text-align: right;
+    padding: 8px 10px;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid var(--grid);
+  }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  th {
+    font-weight: 600;
+    color: var(--ink-muted);
+    font-size: 11.5px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  tr:last-child td { border-bottom: none; }
+  td.flag { color: var(--ink); }
+  .pill {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--tag-bg);
+    color: var(--accent);
+    margin-left: 6px;
+  }
+
+  .note {
+    font-size: 12.5px;
+    color: var(--ink-2);
+    line-height: 1.6;
+  }
+  .note code {
+    font-size: 11.5px;
+    background: var(--tag-bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  @media (max-width: 720px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    .grid-small { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">speech-classifier &middot; curated pool &middot; audio EDA</div>
+    <h1>Per-clip duration distribution</h1>
+    <p class="dek">
+      Real durations measured with <code>ffprobe</code> on every curated audio
+      file (28,237 clips across 6 accent classes) — not the file-size estimate
+      the dashboard normally shows.
+    </p>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+
+  <section class="card">
+    <h2>All classes combined</h2>
+    <p class="cap">0–15s, 0.5s bins &middot; bar past 15s folds into the rightmost "15s+" bucket</p>
+    <div class="chart-scroll"><svg id="chart-overall" width="1032" height="220"></svg></div>
+  </section>
+
+  <section class="card">
+    <h2>By class</h2>
+    <p class="cap">Same bins and x-axis as above, so the shapes are directly comparable &middot; dashed line = median</p>
+    <div class="grid-small" id="facets"></div>
+  </section>
+
+  <section class="card">
+    <h2>Summary statistics</h2>
+    <div class="chart-scroll">
+      <table id="stats-table"></table>
+    </div>
+    <p class="note" style="margin-top:14px">
+      <b>CN</b> stands out: p95 of 23.1s vs ~5.5–6s for every other class, and a
+      47.8s max — worth spot-checking a few of its longest clips before training
+      (silence-padded files? a different source mix?).
+    </p>
+  </section>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const DATA = {"bin": 0.5, "maxx": 15.0, "nbins": 30, "classes": ["AU", "CA", "CN", "IN", "UK", "US"], "overall_bins": [2, 262, 1407, 2204, 3166, 3789, 4069, 3865, 3478, 2420, 1617, 850, 430, 183, 80, 19, 14, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 379], "by_class_bins": {"AU": [1, 50, 267, 422, 568, 681, 697, 703, 564, 386, 217, 132, 70, 18, 10, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33], "CA": [1, 52, 201, 390, 653, 814, 934, 886, 819, 518, 361, 170, 85, 42, 17, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 54], "CN": [0, 9, 40, 87, 90, 150, 142, 145, 166, 96, 94, 41, 20, 10, 5, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 74], "IN": [0, 50, 234, 343, 441, 530, 539, 520, 478, 334, 254, 136, 78, 35, 12, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 74], "UK": [0, 36, 279, 463, 697, 818, 876, 794, 720, 528, 331, 175, 82, 39, 19, 5, 4, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 64], "US": [0, 65, 386, 499, 717, 796, 881, 817, 731, 558, 360, 196, 95, 39, 17, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80]}, "overall_stats": {"n": 28237, "mean": 3.6820362084499063, "p50": 3.4, "p90": 5.168583, "p95": 5.700042, "max": 57.965714}, "class_stats": {"AU": {"n": 4825, "mean": 3.423593651813472, "p50": 3.3, "p90": 5.0, "p95": 5.5999916, "max": 26.827755}, "CA": {"n": 6002, "mean": 3.6318905224925024, "p50": 3.4, "p90": 5.1, "p95": 5.6, "max": 32.600816}, "CN": {"n": 1170, "mean": 5.211906852991453, "p50": 3.7, "p90": 5.9, "p95": 23.106612099999996, "max": 47.777959}, "IN": {"n": 4064, "mean": 3.8230553282480315, "p50": 3.399958, "p90": 5.3, "p95": 6.0, "max": 57.965714}, "UK": {"n": 5933, "mean": 3.6107543709758976, "p50": 3.388, "p90": 5.1, "p95": 5.7, "max": 36.597551}, "US": {"n": 6243, "mean": 3.619217776229377, "p50": 3.376, "p90": 5.2, "p95": 5.7, "max": 41.195102}}};
+
+const tooltip = document.getElementById('tooltip');
+function showTip(evt, html) {
+  tooltip.innerHTML = html;
+  tooltip.style.left = evt.clientX + 'px';
+  tooltip.style.top = evt.clientY + 'px';
+  tooltip.classList.add('show');
+}
+function hideTip() { tooltip.classList.remove('show'); }
+
+function human(s) {
+  if (s >= 60) return (s/60).toFixed(1) + 'm';
+  return s.toFixed(1) + 's';
+}
+
+// ---- stat tiles ----
+const os = DATA.overall_stats;
+const longest = Object.entries(DATA.class_stats).sort((a,b)=>b[1].max-a[1].max)[0];
+const tiles = [
+  ['Total clips', os.n.toLocaleString(), '6 accent classes'],
+  ['Mean duration', human(os.mean), `median ${human(os.p50)}`],
+  ['P95 duration', human(os.p95), `p90 ${human(os.p90)}`],
+  ['Longest clip', human(os.max), `${longest[0]} class`],
+];
+document.getElementById('tiles').innerHTML = tiles.map(([label,value,sub]) => `
+  <div class="tile">
+    <div class="label">${label}</div>
+    <div class="value">${value}</div>
+    <div class="sub">${sub}</div>
+  </div>`).join('');
+
+// ---- bar chart builder (shared by overall + facets) ----
+function buildBars(svgEl, bins, opts) {
+  const { width, height, medianX } = opts;
+  const padL = 30, padR = 6, padT = 8, padB = 18;
+  const w = width - padL - padR, h = height - padT - padB;
+  const maxV = Math.max(...bins);
+  const n = bins.length;
+  const barW = w / n;
+
+  svgEl.setAttribute('width', width);
+  svgEl.setAttribute('height', height);
+  svgEl.innerHTML = '';
+
+  const ns = 'http://www.w3.org/2000/svg';
+  const g = document.createElementNS(ns, 'g');
+  g.setAttribute('transform', `translate(${padL},${padT})`);
+  svgEl.appendChild(g);
+
+  // gridlines (3)
+  for (let i = 1; i <= 3; i++) {
+    const y = h - (h * i / 3);
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', 0); line.setAttribute('x2', w);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('class', 'gridline');
+    g.appendChild(line);
+  }
+
+  bins.forEach((v, i) => {
+    const bh = maxV ? (v / maxV) * h : 0;
+    const rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('x', i * barW + 0.5);
+    rect.setAttribute('y', h - bh);
+    rect.setAttribute('width', Math.max(barW - 1, 1));
+    rect.setAttribute('height', bh);
+    rect.setAttribute('rx', Math.min(2, barW/3));
+    rect.setAttribute('class', 'bar');
+    const lo = (i * DATA.bin).toFixed(1);
+    const label = i === n - 1 ? `${DATA.maxx.toFixed(0)}s+` : `${lo}–${(i*DATA.bin+DATA.bin).toFixed(1)}s`;
+    rect.addEventListener('mousemove', (e) => showTip(e, `<b>${v.toLocaleString()}</b> clips<br>${label}`));
+    rect.addEventListener('mouseleave', hideTip);
+    g.appendChild(rect);
+  });
+
+  // baseline
+  const base = document.createElementNS(ns, 'line');
+  base.setAttribute('x1', 0); base.setAttribute('x2', w);
+  base.setAttribute('y1', h); base.setAttribute('y2', h);
+  base.setAttribute('class', 'baseline');
+  g.appendChild(base);
+
+  // median marker
+  if (medianX !== undefined) {
+    const mx = Math.min(medianX / DATA.maxx, 1) * w;
+    const ml = document.createElementNS(ns, 'line');
+    ml.setAttribute('x1', mx); ml.setAttribute('x2', mx);
+    ml.setAttribute('y1', 0); ml.setAttribute('y2', h);
+    ml.setAttribute('class', 'median-line');
+    g.appendChild(ml);
+  }
+
+  // x ticks: 0, 5, 10, 15+
+  [0, 5, 10, DATA.maxx].forEach((t) => {
+    const x = Math.min(t / DATA.maxx, 1) * w;
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', x);
+    label.setAttribute('y', height - 4);
+    label.setAttribute('class', 'axis-label');
+    label.setAttribute('text-anchor', t === 0 ? 'start' : t === DATA.maxx ? 'end' : 'middle');
+    label.textContent = t === DATA.maxx ? `${t.toFixed(0)}s+` : `${t}s`;
+    svgEl.appendChild(label);
+  });
+  // y max label
+  const ymax = document.createElementNS(ns, 'text');
+  ymax.setAttribute('x', padL - 6);
+  ymax.setAttribute('y', padT + 8);
+  ymax.setAttribute('text-anchor', 'end');
+  ymax.setAttribute('class', 'axis-label');
+  ymax.textContent = maxV.toLocaleString();
+  svgEl.appendChild(ymax);
+}
+
+buildBars(document.getElementById('chart-overall'), DATA.overall_bins,
+  { width: 1032, height: 220, medianX: os.p50 });
+
+// ---- facets ----
+const facetsEl = document.getElementById('facets');
+DATA.classes.forEach((cc) => {
+  const wrap = document.createElement('div');
+  wrap.className = 'facet';
+  const st = DATA.class_stats[cc];
+  wrap.innerHTML = `
+    <div class="facet-head">
+      <span class="cc">${cc}${cc === 'CN' ? '<span class="pill">long tail</span>' : ''}</span>
+      <span class="n">n=${st.n.toLocaleString()} &middot; median ${human(st.p50)}</span>
+    </div>
+    <svg width="330" height="150"></svg>
+  `;
+  facetsEl.appendChild(wrap);
+  buildBars(wrap.querySelector('svg'), DATA.by_class_bins[cc],
+    { width: 330, height: 150, medianX: st.p50 });
+});
+
+// ---- stats table ----
+const rows = DATA.classes.map((cc) => ({ cc, ...DATA.class_stats[cc] }))
+  .sort((a,b) => b.n - a.n);
+rows.push({ cc: 'All', ...os });
+const table = document.getElementById('stats-table');
+table.innerHTML = `
+  <thead><tr>
+    <th>Class</th><th>Clips</th><th>Mean</th><th>Median</th>
+    <th>P90</th><th>P95</th><th>Max</th>
+  </tr></thead>
+  <tbody>
+    ${rows.map(r => `
+      <tr${r.cc === 'All' ? ' style="font-weight:600"' : ''}>
+        <td>${r.cc}</td>
+        <td>${r.n.toLocaleString()}</td>
+        <td>${human(r.mean)}</td>
+        <td>${human(r.p50)}</td>
+        <td>${human(r.p90)}</td>
+        <td class="${r.cc==='CN' ? 'flag' : ''}">${human(r.p95)}</td>
+        <td class="${r.cc==='CN' ? 'flag' : ''}">${human(r.max)}</td>
+      </tr>`).join('')}
+  </tbody>
+`;
+</script>

@@ -32,3 +32,6 @@ tensorboard>=2.17
 gcsfs>=2024.6
 # serve_dataset_report.py: local dataset dashboard with a refresh button
 flask>=3.0
+# train.py --hypertune: report macro_f1 to Vertex AI Vizier (HP tuning jobs).
+# Harmless when unused; only imported under the --hypertune flag.
+cloudml-hypertune>=0.1.0.dev6
