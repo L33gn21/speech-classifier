@@ -27,7 +27,14 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from config import CURATED_ROOT, MANIFEST_DIR, MAX_SAMPLES, SAMPLE_RATE
+from config import (
+    COUNTRY_IGNORE_INDEX,
+    CURATED_ROOT,
+    MANIFEST_DIR,
+    MAX_SAMPLES,
+    SAMPLE_RATE,
+    SPOOF_ROOT,
+)
 
 
 def load_audio(path: Path) -> np.ndarray:
@@ -241,6 +248,85 @@ class AccentDataset(Dataset):
         return {"waveform": wav, "label": int(row["label"])}
 
 
+def _crop_and_augment(wav: np.ndarray, augment: bool, aug_strength: float) -> np.ndarray:
+    """Shared crop (+ optional augmentation) — identical policy to AccentDataset.
+
+    Kept as a module helper so MultiTaskDataset applies the *exact same* window
+    crop and augmentation (legacy or domain-randomization) that the validated
+    single-task path uses. real and fake clips go through this identically, which
+    is the whole point of the multi-task channel-confound control (both sides get
+    the same domain randomization so channel can't be a shortcut).
+    """
+    # AccentDataset.__getitem__ 과 동일한 크롭·증강 정책을 공유 헬퍼로 뺀 것.
+    # real·fake 클립이 완전히 같은 변환을 거치게 하여(양쪽 동일 domain_augment) 채널이
+    # real/fake 판별의 지름길이 되지 않도록 한다(멀티태스크 채널 confound 통제 핵심).
+    rng = np.random.default_rng() if augment else None
+    if len(wav) > MAX_SAMPLES:
+        if augment:
+            start = int(rng.integers(0, len(wav) - MAX_SAMPLES + 1))
+            wav = wav[start:start + MAX_SAMPLES]
+        else:
+            wav = wav[:MAX_SAMPLES]
+    if augment:
+        if aug_strength > 0:
+            wav = domain_augment(wav, rng, aug_strength)
+            if len(wav) > MAX_SAMPLES:
+                wav = wav[:MAX_SAMPLES]
+        else:
+            wav = augment_waveform(wav, rng)
+    return wav
+
+
+class MultiTaskDataset(Dataset):
+    """Dataset for joint country + real/fake training over a unified manifest.
+
+    The unified manifest (built by prepare_data_multitask.build_multitask_splits)
+    has columns: ``filename, dataset, subdir, country_label, fake_label, speaker,
+    source``. Audio resolves as ``<root(dataset)>/<subdir>/audio/<filename>`` where
+    ``dataset`` is ``accent`` (-> curated_root, the GLOBE/SAA country pool) or
+    ``spoof`` (-> spoof_root, curated_spoof/asvspoof2019_la/<split>).
+
+    ``country_label`` is the 0..5 country id for accent clips, or
+    ``COUNTRY_IGNORE_INDEX`` (-100) for spoof clips (no country label -> ignored by
+    the country loss). ``fake_label`` is 0=real / 1=fake for every clip.
+    """
+    # 국가 + real/fake 를 함께 학습하기 위한 통합 데이터셋. 통합 매니페스트 컬럼:
+    # filename,dataset,subdir,country_label,fake_label,speaker,source.
+    # 오디오 경로 = <root(dataset)>/<subdir>/audio/<filename> (accent→curated_root,
+    # spoof→spoof_root). country_label 은 accent 는 0..5, spoof 는 -100(국가 손실 무시).
+    # fake_label 은 모든 클립에 대해 0=real / 1=fake.
+    def __init__(
+        self,
+        manifest: "str | Path | pd.DataFrame",
+        curated_root: Path = CURATED_ROOT,
+        spoof_root: Path = SPOOF_ROOT,
+        augment: bool = False,
+        aug_strength: float = 0.0,
+    ):
+        if isinstance(manifest, pd.DataFrame):
+            self.df = manifest.reset_index(drop=True)
+        else:
+            self.df = pd.read_csv(manifest)
+        self.roots = {"accent": Path(curated_root), "spoof": Path(spoof_root)}
+        self.augment = augment
+        self.aug_strength = float(aug_strength)
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def __getitem__(self, idx: int) -> dict:
+        row = self.df.iloc[idx]
+        root = self.roots[row["dataset"]]
+        path = root / str(row["subdir"]) / "audio" / row["filename"]
+        wav = load_audio(path)
+        wav = _crop_and_augment(wav, self.augment, self.aug_strength)
+        return {
+            "waveform": wav,
+            "country_label": int(row["country_label"]),
+            "fake_label": int(row["fake_label"]),
+        }
+
+
 @dataclass
 class DataCollator:
     """Normalize + pad a batch via the Wav2Vec2 feature extractor."""
@@ -261,6 +347,36 @@ class DataCollator:
             return_tensors="pt",
         )
         out["labels"] = labels
+        return out
+
+
+@dataclass
+class MultiTaskCollator:
+    """Normalize + pad a batch and emit *two* label tensors (country + fake).
+
+    Mirrors DataCollator but returns ``country_labels`` and ``fake_labels`` under
+    those exact keys so the HF Trainer (with
+    ``TrainingArguments.label_names=["country_labels","fake_labels"]``) forwards
+    both to the model and back out of ``predict()`` as a label tuple.
+    """
+    # DataCollator 와 동일하게 정규화·패딩하되, country_labels·fake_labels 두 개의
+    # 라벨 텐서를 반환한다. TrainingArguments.label_names 에 이 키들을 등록하면 HF
+    # Trainer 가 둘 다 모델로 전달하고 predict() 결과의 label_ids 로도 돌려준다.
+    feature_extractor: object
+
+    def __call__(self, batch: list[dict]) -> dict:
+        waveforms = [b["waveform"] for b in batch]
+        out = self.feature_extractor(
+            waveforms,
+            sampling_rate=SAMPLE_RATE,
+            padding=True,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+        out["country_labels"] = torch.tensor(
+            [b["country_label"] for b in batch], dtype=torch.long)
+        out["fake_labels"] = torch.tensor(
+            [b["fake_label"] for b in batch], dtype=torch.long)
         return out
 
 

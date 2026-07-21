@@ -105,6 +105,31 @@ ID2LABEL: dict[int, str] = {i: name for name, i in LABEL2ID.items()}
 NUM_LABELS = len(LABELS)
 
 # ---------------------------------------------------------------------------
+# Spoof / fake-detection axis (multi-task real/fake head)
+# fake(합성 음성) 탐지 축 — 국가와 별개의 두 번째 라벨 축(멀티태스크 헤드)
+# ---------------------------------------------------------------------------
+# spoof 코퍼스(ASVspoof 2019 LA)는 국가 curated 풀과 분리된 별도 프리픽스에 있다
+# (레이아웃·스키마가 다르므로 국가 로더는 이걸 스캔하지 않는다 — DATASET.md §10).
+# 기본값을 CURATED_ROOT 의 "형제" 경로로 두면, Vertex 에서 CV_CURATED_ROOT 가
+# gs://bucket/curated 로 주입될 때 spoof 도 /gcs/bucket/curated_spoof/... 로 자동
+# 해석된다(추가 env 주입 불필요). CV_SPOOF_ROOT 로 따로 재정의도 가능.
+SPOOF_ROOT = _env_path(
+    "CV_SPOOF_ROOT", CURATED_ROOT.parent / "curated_spoof" / "asvspoof2019_la"
+)
+# ASVspoof 프로토콜 스플릿 — 반드시 보존(eval 은 train/dev 에 없는 미지 공격 A07–A19).
+SPOOF_SPLITS: list[str] = ["train", "dev", "eval"]
+
+# real/fake 헤드 레이블(이진). 순서 고정: real=0, fake=1 (학습된 fake 헤드가 의존).
+FAKE_LABELS: list[str] = ["real", "fake"]
+FAKE2ID: dict[str, int] = {name: i for i, name in enumerate(FAKE_LABELS)}
+ID2FAKE: dict[int, str] = {i: name for name, i in FAKE2ID.items()}
+NUM_FAKE_LABELS = len(FAKE_LABELS)
+
+# country 헤드에서 국가 라벨이 없는 클립(=spoof 코퍼스)을 손실 계산에서 제외하기
+# 위한 sentinel. torch.nn.functional.cross_entropy(ignore_index=...) 규약과 동일.
+COUNTRY_IGNORE_INDEX = -100
+
+# ---------------------------------------------------------------------------
 # Audio
 # 오디오 관련 설정
 # ---------------------------------------------------------------------------

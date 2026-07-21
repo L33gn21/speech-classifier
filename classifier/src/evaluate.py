@@ -23,13 +23,33 @@ import json
 import os
 
 import numpy as np
+import pandas as pd
 import torch
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    roc_curve,
+)
 from torch.utils.data import DataLoader
 from transformers import AutoFeatureExtractor
 
-from config import CURATED_ROOT, LABELS, OUTPUT_DIR
-from dataset import AccentDataset, DataCollator
+from config import (
+    COUNTRY_IGNORE_INDEX,
+    CURATED_ROOT,
+    FAKE_LABELS,
+    LABELS,
+    NUM_FAKE_LABELS,
+    OUTPUT_DIR,
+    SPOOF_ROOT,
+)
+from dataset import (
+    AccentDataset,
+    DataCollator,
+    MultiTaskCollator,
+    MultiTaskDataset,
+)
 from model import AccentClassifier, load_from_dir
 
 
@@ -55,6 +75,85 @@ def load_trained(model_dir: str) -> AccentClassifier:
     return model
 
 
+def _eer(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Equal Error Rate from spoof scores (label 1=fake as positive). Standard
+    anti-spoofing metric: the threshold where FPR == FNR."""
+    # 위조 점수로부터 EER(동일오류율) — anti-spoofing 표준 지표. FPR=FNR 이 되는 지점.
+    if len(np.unique(labels)) < 2:
+        return float("nan")
+    fpr, tpr, _ = roc_curve(labels, scores, pos_label=1)
+    fnr = 1.0 - tpr
+    i = int(np.nanargmin(np.abs(fnr - fpr)))
+    return float((fpr[i] + fnr[i]) / 2.0)
+
+
+@torch.no_grad()
+def evaluate_multitask(model, collator, manifest_path, curated_root, spoof_root,
+                       batch_size, device, model_dir) -> None:
+    """Score both heads on a unified (country + real/fake) manifest.
+
+    Country metrics use only accent rows (country_label != -100); real/fake
+    metrics (acc, macro-F1, per-class recall, EER) use every clip. Prints and
+    writes ``test_report_multitask.json``.
+    """
+    # 통합 매니페스트에서 두 헤드를 채점한다. 국가 지표는 accent 행만, real/fake 지표
+    # (acc·macro-F1·클래스별 recall·EER)는 전 클립으로 계산한다.
+    ds = MultiTaskDataset(manifest_path, curated_root=curated_root,
+                          spoof_root=spoof_root)
+    loader = DataLoader(ds, batch_size=batch_size, collate_fn=collator)
+    print(f"multitask eval: {len(ds)} clips on {device}")
+    c_logits, f_logits, c_labels, f_labels = [], [], [], []
+    for batch in loader:
+        cl = batch.pop("country_labels")
+        fl = batch.pop("fake_labels")
+        batch = {k: v.to(device) for k, v in batch.items()}
+        out = model(**batch)
+        c_logits.append(out.logits.cpu().numpy())
+        f_logits.append(out.fake_logits.cpu().numpy())
+        c_labels.append(cl.numpy())
+        f_labels.append(fl.numpy())
+    c_logits = np.concatenate(c_logits); f_logits = np.concatenate(f_logits)
+    c_labels = np.concatenate(c_labels); f_labels = np.concatenate(f_labels)
+
+    fake_ids = list(range(NUM_FAKE_LABELS))
+    fp = np.argmax(f_logits, axis=-1)
+    # fake 확률(클래스 1)로 EER 계산. softmax 안 해도 순위 동일하나 명확성 위해 적용.
+    fscore = np.exp(f_logits[:, 1]) / np.exp(f_logits).sum(axis=-1)
+    print("\n=== real/fake head ===")
+    print(f"accuracy : {accuracy_score(f_labels, fp):.4f}")
+    print(f"macro_f1 : {f1_score(f_labels, fp, average='macro', labels=fake_ids):.4f}")
+    print(f"EER      : {_eer(fscore, f_labels):.4f}")
+    print(classification_report(f_labels, fp, labels=fake_ids,
+                                target_names=FAKE_LABELS, digits=4, zero_division=0))
+
+    out = {
+        "fake": {
+            "accuracy": float(accuracy_score(f_labels, fp)),
+            "macro_f1": float(f1_score(f_labels, fp, average="macro", labels=fake_ids)),
+            "eer": _eer(fscore, f_labels),
+            "confusion_matrix": confusion_matrix(f_labels, fp, labels=fake_ids).tolist(),
+        }
+    }
+    mask = c_labels != COUNTRY_IGNORE_INDEX
+    if mask.any():
+        ids = list(range(len(LABELS)))
+        cp = np.argmax(c_logits[mask], axis=-1); cl = c_labels[mask]
+        print("\n=== country head (accent rows only) ===")
+        print(f"accuracy : {accuracy_score(cl, cp):.4f}")
+        print(f"macro_f1 : {f1_score(cl, cp, average='macro', labels=ids):.4f}")
+        print(classification_report(cl, cp, labels=ids, target_names=LABELS,
+                                    digits=4, zero_division=0))
+        out["country"] = {
+            "accuracy": float(accuracy_score(cl, cp)),
+            "macro_f1": float(f1_score(cl, cp, average="macro", labels=ids)),
+            "confusion_matrix": confusion_matrix(cl, cp, labels=ids).tolist(),
+        }
+    dest = os.path.join(model_dir, "test_report_multitask.json")
+    with open(dest, "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"\nsaved {dest}")
+
+
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -63,6 +162,8 @@ def main() -> None:
     ap.add_argument("--manifest-dir", default=None,
                     help="dir holding test.csv (default: <model-dir>/manifests)")
     ap.add_argument("--curated-root", default=str(CURATED_ROOT))
+    ap.add_argument("--spoof-root", default=str(SPOOF_ROOT),
+                    help="curated_spoof root (multitask manifests only)")
     ap.add_argument("--batch-size", type=int, default=8)
     args = ap.parse_args()
 
@@ -72,6 +173,18 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_trained(args.model_dir).to(device)
     fe = AutoFeatureExtractor.from_pretrained(args.model_dir)
+
+    # 멀티태스크 모델 + 통합 매니페스트(fake_label 컬럼 존재)면 두 헤드를 함께 채점.
+    # 그 외(VoxForge 등 country 전용 매니페스트)는 기존 country-only 경로 유지.
+    test_csv = os.path.join(manifest_dir, "test.csv")
+    if getattr(model, "fake_head_enabled", False) and os.path.exists(test_csv):
+        cols = pd.read_csv(test_csv, nrows=0).columns
+        if "fake_label" in cols:
+            evaluate_multitask(model, MultiTaskCollator(fe), test_csv,
+                               args.curated_root, args.spoof_root,
+                               args.batch_size, device, args.model_dir)
+            return
+
     collator = DataCollator(fe)
 
     test_ds = AccentDataset(os.path.join(manifest_dir, "test.csv"),

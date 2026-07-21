@@ -80,6 +80,8 @@ class AccentOutput(ModelOutput):
     loss: torch.FloatTensor | None = None
     logits: torch.FloatTensor | None = None            # [B, C] utterance-level
     # 발화(문장) 전체에 대한 클래스별 로짓. [배치, 클래스수]
+    fake_logits: torch.FloatTensor | None = None       # [B, 2] real/fake (opt-in)
+    # real/fake 이진 헤드 로짓(멀티태스크). fake 헤드가 켜진 모델에서만 채워짐. [배치, 2]
     frame_logits: torch.FloatTensor | None = None      # [B, T, C] (opt-in)
     # 프레임(시간 스텝)별 클래스 로짓. 요청 시에만 계산되어 채워짐. [배치, 시간, 클래스수]
 
@@ -87,7 +89,8 @@ class AccentOutput(ModelOutput):
 class AccentClassifier(nn.Module):
     def __init__(self, model_name: str = MODEL_NAME, num_labels: int = NUM_LABELS,
                  dropout: float = 0.1, pretrained: bool = True,
-                 head: str = "mean", layer_weighting: bool = False):
+                 head: str = "mean", layer_weighting: bool = False,
+                 fake_head: bool = False, num_fake_labels: int = 2):
         super().__init__()
         # 사전학습된 음성 인코더(백본)를 불러온다. AutoModel 을 쓰므로 model_name 이
         # facebook/wav2vec2-* 이면 Wav2Vec2Model, microsoft/wavlm-* 이면 WavLMModel 이
@@ -124,15 +127,26 @@ class AccentClassifier(nn.Module):
         if layer_weighting:
             n_states = self.wav2vec2.config.num_hidden_layers + 1  # +1: embedding 출력
             self.layer_weights = nn.Parameter(torch.zeros(n_states))
+        # pooled utterance 표현 차원: mean 헤드는 hidden, attentive 는 [μ;σ] 로 2*hidden.
+        pooled_dim = hidden * 2 if head == "attentive" else hidden
         if head == "attentive":
             self.attn = nn.Linear(hidden, 1)          # 프레임별 어텐션 스코어
-            self.classifier = nn.Linear(hidden * 2, num_labels)  # [μ; σ] -> 클래스
+            self.classifier = nn.Linear(pooled_dim, num_labels)  # [μ; σ] -> 클래스
         elif head == "mean":
             # 분류를 위한 단일 선형층(헤드). hidden 차원 -> 클래스 개수로 매핑.
-            self.classifier = nn.Linear(hidden, num_labels)
+            self.classifier = nn.Linear(pooled_dim, num_labels)
         else:
             raise ValueError(f"unknown head type: {head}")
         self.num_labels = num_labels
+
+        # -- fake(real/spoof) 헤드 (멀티태스크, opt-in) -------------------------
+        # 공유 백본의 동일한 utterance pooled 표현에서 real/fake 이진 분류를 한다.
+        # country 헤드와 백본을 공유하되 헤드만 분리된다. fake_head=False 면 만들지
+        # 않으므로 기존 country-only 체크포인트와 state_dict 가 완전히 동일하다.
+        self.fake_head_enabled = bool(fake_head)
+        self.num_fake_labels = num_fake_labels
+        if self.fake_head_enabled:
+            self.fake_classifier = nn.Linear(pooled_dim, num_fake_labels)
         # keep label maps on the module for saving/loading
         # 모델 저장/로드 시 레이블 정보도 함께 보존하기 위해 config에 기록해둔다.
         self.config = self.wav2vec2.config
@@ -280,17 +294,28 @@ class AccentClassifier(nn.Module):
                 summed = (frame_logits * m).sum(dim=1)
                 counts = m.sum(dim=1).clamp(min=1)
                 logits = summed / counts                      # [B, C]
+                # fake 헤드용 pooled = 마스킹 평균 표현(패딩 제외). [B, H]
+                pooled = (hidden * m).sum(dim=1) / counts
             else:
                 logits = frame_logits.mean(dim=1)
+                pooled = hidden.mean(dim=1)
+
+        # real/fake 헤드: 위에서 만든 utterance pooled 표현을 공유해 이진 로짓을 낸다.
+        fake_logits = None
+        if self.fake_head_enabled:
+            fake_logits = self.fake_classifier(self.dropout(pooled))  # [B, 2]
 
         loss = None
         if labels is not None:
-            # 학습 시에는 발화 레벨 로짓과 정답 레이블로 교차 엔트로피 손실을 계산.
+            # 단일태스크(country) 호환 경로: 발화 로짓과 국가 라벨로 CE 손실을 계산한다.
+            # 멀티태스크(country+fake) 결합 손실은 학습측 MultiTaskTrainer 가 담당하며,
+            # 그 경우 이 내부 loss 는 쓰지 않는다(labels 를 넘기지 않음).
             loss = nn.functional.cross_entropy(logits, labels)
 
         return AccentOutput(
             loss=loss,
             logits=logits,
+            fake_logits=fake_logits,
             # 프레임 단위 출력은 요청 시 + mean 헤드일 때만 채워진다(불필요한 메모리 절약).
             frame_logits=frame_logits if output_frame_logits else None,
         )
@@ -315,7 +340,8 @@ MODEL_CONFIG_FILE = "model_config.json"
 
 
 def write_model_config(model_dir, *, backbone: str, num_labels: int,
-                       dropout: float, head: str, layer_weighting: bool) -> None:
+                       dropout: float, head: str, layer_weighting: bool,
+                       fake_head: bool = False, num_fake_labels: int = 2) -> None:
     """Persist the arch hyperparameters needed to rebuild this model for inference."""
     cfg = {
         "backbone": backbone,
@@ -323,6 +349,9 @@ def write_model_config(model_dir, *, backbone: str, num_labels: int,
         "dropout": dropout,
         "head": head,
         "layer_weighting": layer_weighting,
+        # fake 헤드 유무·크기(멀티태스크). 옛 체크포인트엔 이 키가 없어 로드 시 False 폴백.
+        "fake_head": bool(fake_head),
+        "num_fake_labels": num_fake_labels,
     }
     with open(Path(model_dir) / MODEL_CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
@@ -353,4 +382,7 @@ def load_from_dir(model_dir, num_labels: int | None = None) -> "AccentClassifier
         pretrained=False,
         head=cfg.get("head", "mean"),
         layer_weighting=cfg.get("layer_weighting", False),
+        # 옛 country-only 체크포인트엔 fake_head 키가 없다 → False 폴백(구조 동일).
+        fake_head=cfg.get("fake_head", False),
+        num_fake_labels=cfg.get("num_fake_labels", 2),
     )

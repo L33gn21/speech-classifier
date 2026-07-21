@@ -52,19 +52,26 @@ from transformers import (
 )
 
 from config import (
+    COUNTRY_IGNORE_INDEX,
     CURATED_ROOT,
+    FAKE_LABELS,
+    ID2FAKE,
     ID2LABEL,
     LABELS,
     MODEL_NAME,
+    NUM_FAKE_LABELS,
     OUTPUT_DIR,
     SEED,
+    SPOOF_ROOT,
     TARGET_PER_CLASS,
     TEST_FRACTION,
     VAL_FRACTION,
 )
-from dataset import AccentDataset, DataCollator
+from dataset import AccentDataset, DataCollator, MultiTaskCollator, MultiTaskDataset
 from model import AccentClassifier, write_model_config
 from prepare_data import build_splits, report
+from prepare_data_multitask import build_multitask_splits
+from prepare_data_multitask import report as report_mt
 
 
 def compute_metrics(eval_pred):
@@ -180,6 +187,279 @@ class WeightedTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
+# ===========================================================================
+# Multi-task (country + real/fake) training
+# 멀티태스크(국가 + real/fake) 학습
+# ===========================================================================
+def _weights_from_counts(counts: np.ndarray, scheme: str, n: int):
+    """Inverse-frequency (or sqrt-tempered) class weights, mean-normalized to ~1."""
+    # 역빈도(또는 sqrt 완화) 클래스 가중치. 평균 가중치가 ~1 이 되도록 정규화해
+    # 실효 학습률을 바꾸지 않는다(compute_class_weights 와 동일한 관례).
+    counts = np.clip(counts.astype(np.float64), 1.0, None)
+    if scheme == "balanced":
+        w = 1.0 / counts
+    elif scheme == "sqrt":
+        w = 1.0 / np.sqrt(counts)
+    else:
+        raise ValueError(f"unknown class-weight scheme: {scheme}")
+    w = w * (n / w.sum())
+    return torch.tensor(w, dtype=torch.float32)
+
+
+def compute_country_weights_mt(train_df, scheme: str):
+    """Country-head class weights from accent rows only (country_label != -100)."""
+    # 국가 헤드 가중치 — accent 행(국가 라벨이 있는 행)만으로 계산. spoof(-100)는 제외.
+    if scheme == "none":
+        return None
+    lab = train_df.loc[train_df["country_label"] != COUNTRY_IGNORE_INDEX, "country_label"]
+    counts = (lab.value_counts().reindex(range(len(LABELS)), fill_value=0)
+              .to_numpy(dtype=np.float64))
+    return _weights_from_counts(counts, scheme, len(LABELS))
+
+
+def compute_fake_weights_mt(train_df, scheme: str):
+    """Real/fake-head class weights over all clips (absorbs the ~8.7:1 imbalance)."""
+    # real/fake 헤드 가중치 — 전체 클립의 fake_label 로 계산(8.7:1 불균형 흡수).
+    if scheme == "none":
+        return None
+    counts = (train_df["fake_label"].value_counts().reindex(range(NUM_FAKE_LABELS), fill_value=0)
+              .to_numpy(dtype=np.float64))
+    return _weights_from_counts(counts, scheme, NUM_FAKE_LABELS)
+
+
+def compute_metrics_multitask(eval_pred):
+    """Metrics for both heads. predictions=(country_logits, fake_logits),
+    label_ids=(country_labels, fake_labels) — see MultiTaskCollator + label_names.
+    """
+    # 두 헤드 지표를 함께 계산한다. predictions/label_ids 는 (country, fake) 튜플이다
+    # (MultiTaskCollator 가 두 라벨을 내고 TrainingArguments.label_names 로 등록됨).
+    preds, labels = eval_pred.predictions, eval_pred.label_ids
+    country_logits, fake_logits = preds[0], preds[1]
+    country_labels, fake_labels = labels[0], labels[1]
+
+    metrics = {}
+    # --- real/fake head (primary; model selection uses fake_macro_f1) ---
+    fp = np.argmax(fake_logits, axis=-1)
+    fake_ids = list(range(NUM_FAKE_LABELS))
+    metrics["fake_accuracy"] = float(accuracy_score(fake_labels, fp))
+    metrics["fake_macro_f1"] = float(f1_score(fake_labels, fp, average="macro", labels=fake_ids))
+    f_f1 = f1_score(fake_labels, fp, average=None, labels=fake_ids)
+    for i, name in ID2FAKE.items():
+        metrics[f"fake_f1_{name}"] = float(f_f1[i])
+
+    # --- country head (only rows with a real country label; spoof rows ignored) ---
+    mask = country_labels != COUNTRY_IGNORE_INDEX
+    if mask.any():
+        cp = np.argmax(country_logits[mask], axis=-1)
+        cl = country_labels[mask]
+        ids = list(range(len(LABELS)))
+        metrics["country_accuracy"] = float(accuracy_score(cl, cp))
+        metrics["country_macro_f1"] = float(f1_score(cl, cp, average="macro", labels=ids))
+
+    # --- combined selection metric ---------------------------------------------
+    # fake dev(=seen attacks A01-A06) saturates by ~epoch 1, so selecting on
+    # fake_macro_f1 alone would let early-stopping cut country short. Select on the
+    # mean of both heads so the near-flat-high fake term keeps the model honest
+    # while the country term (which actually improves over epochs) drives the pick.
+    # fake 는 dev(seen 공격)에서 곧 포화하므로 그것만으로 최적 체크포인트를 고르면
+    # country 가 덜 학습된 채 조기 종료될 수 있다. 두 헤드 macro-F1 의 평균으로 선택해
+    # 포화된 fake 는 유지하되 에폭마다 오르는 country 가 선택을 이끌게 한다.
+    metrics["mt_macro_f1"] = float(
+        (metrics["fake_macro_f1"] + metrics.get("country_macro_f1", metrics["fake_macro_f1"]))
+        / 2.0)
+    return metrics
+
+
+class MultiTaskTrainer(Trainer):
+    """HF Trainer with a combined country + real/fake weighted loss.
+
+    ``loss = country_CE(ignore_index=-100, weighted) + λ · fake_CE(weighted)``.
+    The country head only learns from accent clips (spoof clips carry
+    country_label=-100 and are ignored). Reads the two label tensors from the
+    batch WITHOUT mutating it (prediction_step re-reads them for compute_metrics),
+    and calls the model with the label keys stripped so ``forward`` stays clean.
+    """
+    # 국가 + real/fake 결합 가중 손실 Trainer. country_CE(-100 무시, 가중) + λ·fake_CE(가중).
+    # 배치에서 두 라벨을 pop 하지 않고 읽는다(prediction_step 이 뒤에서 다시 읽어
+    # compute_metrics 에 넘기므로). 모델에는 라벨 키를 뺀 입력만 넘겨 forward 를 깔끔히 유지.
+    def __init__(self, *args, country_weights=None, fake_weights=None,
+                 fake_loss_weight: float = 1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cw = country_weights
+        self._fw = fake_weights
+        self._lambda = float(fake_loss_weight)
+
+    def compute_loss(self, model, inputs, return_outputs=False,
+                     num_items_in_batch=None, **kwargs):
+        country_labels = inputs.get("country_labels")
+        fake_labels = inputs.get("fake_labels")
+        model_inputs = {k: v for k, v in inputs.items()
+                        if k not in ("country_labels", "fake_labels", "labels")}
+        outputs = model(**model_inputs)
+        device = outputs.logits.device
+        cw = self._cw.to(device) if self._cw is not None else None
+        fw = self._fw.to(device) if self._fw is not None else None
+        country_loss = F.cross_entropy(
+            outputs.logits, country_labels, weight=cw,
+            ignore_index=COUNTRY_IGNORE_INDEX)
+        # an all-spoof batch has every country label ignored -> CE returns nan (0/0).
+        # 배치가 전부 spoof 면 모든 국가 라벨이 무시되어 CE 가 nan(0/0) → 0 으로 대체.
+        if torch.isnan(country_loss):
+            country_loss = torch.zeros((), device=device)
+        fake_loss = F.cross_entropy(outputs.fake_logits, fake_labels, weight=fw)
+        loss = country_loss + self._lambda * fake_loss
+        return (loss, outputs) if return_outputs else loss
+
+
+def run_multitask(args) -> None:
+    """Joint country + real/fake training entry point (--multitask)."""
+    # 국가 + real/fake 공동 학습 진입점. 국가 전용 경로(main)와 완전히 분리되어
+    # --multitask 미지정 시 검증된 country 레시피가 그대로 재현된다.
+    tb_log_dir = os.environ.get(
+        "AIP_TENSORBOARD_LOG_DIR", os.path.join(args.output_dir, "tb_logs"))
+
+    train_df, val_df, test_df = build_multitask_splits(
+        curated_root=args.curated_root,
+        spoof_root=args.spoof_root,
+        per_class=args.per_class,
+        val_fraction=args.val_fraction,
+        test_fraction=args.test_fraction,
+        spoof_cap=args.spoof_cap,
+        seed=SEED,
+    )
+    report_mt("train", train_df)
+    report_mt("val", val_df)
+    report_mt("test", test_df)
+    manifest_out = os.path.join(args.output_dir, "manifests")
+    os.makedirs(manifest_out, exist_ok=True)
+    for name, part in [("train", train_df), ("val", val_df), ("test", test_df)]:
+        part.to_csv(os.path.join(manifest_out, f"{name}.csv"), index=False)
+
+    feature_extractor = AutoFeatureExtractor.from_pretrained(args.backbone)
+    collator = MultiTaskCollator(feature_extractor)
+
+    train_ds = MultiTaskDataset(train_df, curated_root=args.curated_root,
+                                spoof_root=args.spoof_root,
+                                augment=args.augment, aug_strength=args.aug_strength)
+    eval_ds = MultiTaskDataset(val_df, curated_root=args.curated_root,
+                               spoof_root=args.spoof_root)
+    test_ds = MultiTaskDataset(test_df, curated_root=args.curated_root,
+                               spoof_root=args.spoof_root)
+    aug_kind = ("domain" if args.augment and args.aug_strength > 0
+                else "legacy" if args.augment else "off")
+    print(f"[multitask] train={len(train_ds)} val={len(eval_ds)} test={len(test_ds)} "
+          f"augment={args.augment} aug={aug_kind}(strength={args.aug_strength}) "
+          f"fake_loss_weight={args.fake_loss_weight}")
+
+    model = AccentClassifier(args.backbone, dropout=args.dropout, head=args.head,
+                             layer_weighting=args.layer_weighting, fake_head=True,
+                             num_fake_labels=NUM_FAKE_LABELS)
+    print(f"backbone={args.backbone} head={args.head} "
+          f"layer_weighting={args.layer_weighting} fake_head=True")
+    if args.mask_time_prob is not None or args.mask_feature_prob is not None:
+        model.set_spec_augment(args.mask_time_prob, args.mask_feature_prob)
+    if args.unfreeze_top > 0:
+        model.unfreeze_top_layers(args.unfreeze_top)
+        print(f"backbone frozen except top {args.unfreeze_top} transformer layers")
+    else:
+        model.freeze_backbone()
+        print("backbone fully frozen (training heads only)")
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"trainable params: {trainable:,} / {total:,}")
+
+    training_args = TrainingArguments(
+        output_dir=args.output_dir,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.grad_accum,
+        num_train_epochs=args.epochs,
+        learning_rate=args.lr,
+        warmup_ratio=args.warmup_ratio,
+        weight_decay=args.weight_decay,
+        fp16=not args.no_fp16,
+        gradient_checkpointing=args.gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        logging_steps=50,
+        load_best_model_at_end=True,
+        # 두 헤드 균형 선택(mt_macro_f1 = mean(fake, country)). fake 는 seen-공격 dev 에서
+        # 곧 포화하므로 country 성숙 전 조기 종료를 막기 위해 결합 지표로 고른다.
+        metric_for_best_model="mt_macro_f1",
+        greater_is_better=True,
+        save_total_limit=args.save_total_limit,
+        dataloader_num_workers=4,
+        remove_unused_columns=False,
+        # both label tensors are kept + forwarded and returned as a label tuple.
+        label_names=["country_labels", "fake_labels"],
+        report_to=["tensorboard"],
+        logging_dir=tb_log_dir,
+        seed=SEED,
+    )
+
+    country_weights = compute_country_weights_mt(train_df, args.class_weight)
+    fake_weights = compute_fake_weights_mt(train_df, args.class_weight)
+    if country_weights is not None:
+        print("country weights: %s" % {LABELS[i]: round(float(country_weights[i]), 3)
+                                        for i in range(len(LABELS))})
+    if fake_weights is not None:
+        print("fake weights: %s" % {FAKE_LABELS[i]: round(float(fake_weights[i]), 3)
+                                     for i in range(NUM_FAKE_LABELS)})
+
+    callbacks = []
+    if args.early_stopping_patience and args.early_stopping_patience > 0:
+        callbacks.append(
+            EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience))
+
+    trainer = MultiTaskTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
+        data_collator=collator,
+        compute_metrics=compute_metrics_multitask,
+        country_weights=country_weights,
+        fake_weights=fake_weights,
+        fake_loss_weight=args.fake_loss_weight,
+        callbacks=callbacks,
+    )
+
+    trainer.train()
+    val_metrics = trainer.predict(eval_ds, metric_key_prefix="eval").metrics
+    print("final val eval:", json.dumps(val_metrics, indent=2))
+    test_metrics = trainer.predict(test_ds, metric_key_prefix="test").metrics
+    print("final test eval (held-out; spoof=ASVspoof eval unseen attacks):",
+          json.dumps(test_metrics, indent=2))
+    metrics = {**val_metrics, **test_metrics}
+    metrics["train_config"] = {
+        "multitask": True,
+        "augment": bool(args.augment),
+        "aug_strength": float(args.aug_strength),
+        "aug_kind": aug_kind,
+        "backbone": args.backbone,
+        "head": args.head,
+        "unfreeze_top": args.unfreeze_top,
+        "per_class": args.per_class,
+        "spoof_cap": args.spoof_cap,
+        "fake_loss_weight": args.fake_loss_weight,
+        "epochs": args.epochs,
+    }
+
+    trainer.save_model(args.output_dir)
+    feature_extractor.save_pretrained(args.output_dir)
+    with open(os.path.join(args.output_dir, "label_config.json"), "w") as f:
+        json.dump({"labels": LABELS, "id2label": ID2LABEL,
+                   "fake_labels": FAKE_LABELS, "id2fake": ID2FAKE}, f, indent=2)
+    write_model_config(
+        args.output_dir, backbone=args.backbone, num_labels=len(LABELS),
+        dropout=args.dropout, head=args.head, layer_weighting=args.layer_weighting,
+        fake_head=True, num_fake_labels=NUM_FAKE_LABELS)
+    with open(os.path.join(args.output_dir, "final_metrics.json"), "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"saved to {args.output_dir}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=float, default=8.0)
@@ -202,6 +482,23 @@ def main() -> None:
     ap.add_argument("--output-dir", default=str(OUTPUT_DIR))
     ap.add_argument("--curated-root", default=str(CURATED_ROOT))
     ap.add_argument("--per-class", type=int, default=TARGET_PER_CLASS)
+    # --- multi-task (country + real/fake) knobs -------------------------------
+    ap.add_argument("--multitask", action="store_true",
+                    help="joint country + real/fake head training (adds ASVspoof "
+                         "spoof corpus; without this flag the country recipe is "
+                         "byte-for-byte unchanged)")
+    # 국가 + real/fake 공동 학습(ASVspoof spoof 코퍼스 추가). 미지정 시 기존 country
+    # 레시피가 그대로 재현된다.
+    ap.add_argument("--fake-loss-weight", "--fake_loss_weight", dest="fake_loss_weight",
+                    type=float, default=1.0,
+                    help="λ multiplier on the real/fake loss (multitask only)")
+    # 결합 손실에서 real/fake 손실 항의 가중치 λ (멀티태스크 전용).
+    ap.add_argument("--spoof-cap", "--spoof_cap", dest="spoof_cap", type=int, default=None,
+                    help="cap spoof clips per split (bonafide kept in full); "
+                         "None=all (multitask only)")
+    # 스플릿별 spoof 클립 상한(bonafide 는 전량 유지). None 이면 전량(멀티태스크 전용).
+    ap.add_argument("--spoof-root", default=str(SPOOF_ROOT),
+                    help="root of the curated_spoof/<split>/ corpus (multitask only)")
     ap.add_argument("--val-fraction", type=float, default=VAL_FRACTION)
     ap.add_argument("--test-fraction", type=float, default=TEST_FRACTION)
     ap.add_argument("--no-fp16", action="store_true")
@@ -263,6 +560,12 @@ def main() -> None:
     args = ap.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # 멀티태스크(국가 + real/fake)는 전용 경로로 분기한다. 이 분기를 타지 않으면
+    # 아래 country 전용 코드는 기존과 완전히 동일하게 유지된다(레시피 회귀 방지).
+    if args.multitask:
+        run_multitask(args)
+        return
 
     # Vertex AI Custom Jobs configured with a TensorBoard resource + service
     # account inject AIP_TENSORBOARD_LOG_DIR (a GCS path) and continuously sync
