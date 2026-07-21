@@ -21,11 +21,13 @@ free (time-axis accent heatmap in Level 2) while training on utterance labels.
 from __future__ import annotations
 
 import contextlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn as nn
-from transformers import Wav2Vec2Config, Wav2Vec2Model
+from transformers import AutoConfig, AutoModel
 from transformers.modeling_outputs import ModelOutput
 
 from config import ID2LABEL, LABEL2ID, MODEL_NAME, NUM_LABELS
@@ -84,26 +86,52 @@ class AccentOutput(ModelOutput):
 
 class AccentClassifier(nn.Module):
     def __init__(self, model_name: str = MODEL_NAME, num_labels: int = NUM_LABELS,
-                 dropout: float = 0.1, pretrained: bool = True):
+                 dropout: float = 0.1, pretrained: bool = True,
+                 head: str = "mean", layer_weighting: bool = False):
         super().__init__()
-        # HuggingFace에서 사전학습된 Wav2Vec2 인코더를 불러온다(백본).
+        # 사전학습된 음성 인코더(백본)를 불러온다. AutoModel 을 쓰므로 model_name 이
+        # facebook/wav2vec2-* 이면 Wav2Vec2Model, microsoft/wavlm-* 이면 WavLMModel 이
+        # 자동으로 선택된다. 두 백본은 API(hidden_size, encoder.layers, feature_extractor,
+        # _get_feature_vector_attention_mask, output_hidden_states)가 동일해 아래 코드가
+        # 그대로 동작한다. 속성 이름은 백본 종류와 무관하게 wav2vec2 로 유지해
+        # state_dict 키 접두사(wav2vec2.*)를 안정적으로 둔다.
         # 학습 시에는 pretrained=True로 사전학습 가중치를 받아 미세조정한다.
         # 추론 시에는(pretrained=False) 골격만 config로 만들고 곧바로 우리
-        # safetensors 가중치로 덮어쓰므로, ~360MB짜리 base 백본을 HF에서
-        # 다시 받을 필요가 없다(콜드스타트 단축).
+        # safetensors 가중치로 덮어쓰므로, base 백본을 HF에서 다시 받을 필요가 없다.
         # Both paths build the positional conv under the legacy weight_norm so the
         # pretrained checkpoint loads (training) and our saved checkpoint reloads
         # (inference) with matching state-dict keys. See _legacy_weight_norm.
         # 학습·추론 양쪽 모두 구형 weight_norm으로 pos_conv를 만들어 키를 일치시킨다.
         with _legacy_weight_norm():
             if pretrained:
-                self.wav2vec2 = Wav2Vec2Model.from_pretrained(model_name)
+                self.wav2vec2 = AutoModel.from_pretrained(model_name)
             else:
-                self.wav2vec2 = Wav2Vec2Model(Wav2Vec2Config.from_pretrained(model_name))
+                self.wav2vec2 = AutoModel.from_config(AutoConfig.from_pretrained(model_name))
         hidden = self.wav2vec2.config.hidden_size
         self.dropout = nn.Dropout(dropout)
-        # 분류를 위한 단일 선형층(헤드). hidden 차원 -> 클래스 개수로 매핑.
-        self.classifier = nn.Linear(hidden, num_labels)
+
+        # -- head selection -----------------------------------------------------
+        # head="mean": 프레임별 선형 헤드 후 마스킹 평균(=표현 평균 후 헤드와 동일,
+        #   단일 선형이라). Level 2 프레임 히트맵을 공짜로 얻는 기존 방식.
+        # head="attentive": Attentive Statistics Pooling — 프레임에 어텐션 가중치를
+        #   학습해 가중 평균 μ 와 가중 표준편차 σ 를 구하고 [μ;σ] 로 분류한다. 억양은
+        #   발음의 "분포/변동"에 정보가 있어 평균만 쓰는 것보다 유리(화자/언어ID 정석).
+        self.head_type = head
+        # layer_weighting: 마지막 레이어만 쓰지 않고 전 트랜스포머 레이어 은닉상태의
+        #   학습가능 가중합을 표현으로 쓴다(SUPERB식). 억양·음소 정보가 중간 레이어에
+        #   많으므로 도움이 된다.
+        self.layer_weighting = layer_weighting
+        if layer_weighting:
+            n_states = self.wav2vec2.config.num_hidden_layers + 1  # +1: embedding 출력
+            self.layer_weights = nn.Parameter(torch.zeros(n_states))
+        if head == "attentive":
+            self.attn = nn.Linear(hidden, 1)          # 프레임별 어텐션 스코어
+            self.classifier = nn.Linear(hidden * 2, num_labels)  # [μ; σ] -> 클래스
+        elif head == "mean":
+            # 분류를 위한 단일 선형층(헤드). hidden 차원 -> 클래스 개수로 매핑.
+            self.classifier = nn.Linear(hidden, num_labels)
+        else:
+            raise ValueError(f"unknown head type: {head}")
         self.num_labels = num_labels
         # keep label maps on the module for saving/loading
         # 모델 저장/로드 시 레이블 정보도 함께 보존하기 위해 config에 기록해둔다.
@@ -157,6 +185,25 @@ class AccentClassifier(nn.Module):
             for p in layer.parameters():
                 p.requires_grad = True
 
+    def set_spec_augment(self, time_prob: float | None = None,
+                         feature_prob: float | None = None) -> None:
+        """Tune the backbone's native SpecAugment masking (train-time only).
+
+        wav2vec2/wavlm mask spans of the feature-encoder output during training
+        (``config.apply_spec_augment``). It is on by default at a low rate; raise
+        the mask probabilities for stronger, essentially-free regularization
+        against the channel confound. ``None`` leaves the backbone default.
+        """
+        # 백본 내장 SpecAugment(학습 시 특징 시간/채널 축 마스킹) 세기를 조절한다.
+        # 기본으로 켜져 있으나 확률이 낮다 — 값을 올리면 채널 confound 에 대한 사실상
+        # 공짜 정규화가 된다. None 이면 백본 기본값 유지.
+        cfg = self.wav2vec2.config
+        cfg.apply_spec_augment = True
+        if time_prob is not None:
+            cfg.mask_time_prob = time_prob
+        if feature_prob is not None:
+            cfg.mask_feature_prob = feature_prob
+
     # -- gradient checkpointing (delegated to the backbone) -------------------
     # -- 그래디언트 체크포인팅 (백본에게 위임) ---------------------------------
     # HF Trainer calls these on the top-level model when
@@ -174,31 +221,67 @@ class AccentClassifier(nn.Module):
 
     # -- forward --------------------------------------------------------------
     # -- 순전파(forward) --------------------------------------------------------
+    def _pooled_representation(self, input_values, attention_mask):
+        """Run the backbone and return the frame representation + frame mask.
+
+        Returns ``hidden`` [B, T, H] (a learned layer-weighted sum when
+        ``layer_weighting``, else the last hidden state) and a boolean
+        ``frame_mask`` [B, T] (True on real frames) or None when unmasked.
+        """
+        # 백본을 돌려 프레임 표현과 프레임 마스크를 만든다. layer_weighting 이면 전
+        # 레이어 은닉상태의 학습가능 가중합을, 아니면 마지막 은닉상태를 표현으로 쓴다.
+        outputs = self.wav2vec2(input_values, attention_mask=attention_mask,
+                                output_hidden_states=self.layer_weighting)
+        if self.layer_weighting:
+            hs = torch.stack(outputs.hidden_states, dim=0)    # [L+1, B, T, H]
+            w = torch.softmax(self.layer_weights, dim=0).view(-1, 1, 1, 1)
+            hidden = (hs * w).sum(dim=0)                       # [B, T, H]
+        else:
+            hidden = outputs.last_hidden_state                # [B, T, H]
+
+        frame_mask = None
+        if attention_mask is not None:
+            # attention_mask는 원본 파형 길이 기준이므로, CNN 특징추출기가 만드는
+            # 축소된 시간 축(frame 개수)에 맞게 다시 변환한다.
+            frame_mask = self.wav2vec2._get_feature_vector_attention_mask(
+                hidden.shape[1], attention_mask
+            ).bool()                                          # [B, T]
+        return hidden, frame_mask
+
     def forward(self, input_values, attention_mask=None, labels=None,
                 output_frame_logits: bool = False):
         # input_values: 전처리된(정규화/패딩된) 오디오 파형 배치
         # attention_mask: 패딩된 부분을 구분하기 위한 마스크 (1=실제 데이터, 0=패딩)
-        outputs = self.wav2vec2(input_values, attention_mask=attention_mask)
-        hidden = outputs.last_hidden_state                    # [B, T, H]
-        # 인코더의 마지막 은닉 상태(시퀀스 표현)에 드롭아웃 후 분류 헤드를 적용.
-        # -> 모든 시간 프레임에 대해 클래스별 로짓을 계산.
-        frame_logits = self.classifier(self.dropout(hidden))  # [B, T, C]
+        hidden, frame_mask = self._pooled_representation(input_values, attention_mask)
+        frame_logits = None
 
-        if attention_mask is not None:
-            # attention_mask는 원본 파형 길이 기준이므로, 이를 CNN 특징 추출기가
-            # 만들어내는 축소된 시간 축(frame 개수)에 맞게 다시 변환해야 한다.
-            feat_mask = self.wav2vec2._get_feature_vector_attention_mask(
-                frame_logits.shape[1], attention_mask
-            ).unsqueeze(-1)                                    # [B, T, 1]
-            # 패딩된 프레임을 제외하고, 실제 유효한 프레임들의 로짓만 합산.
-            summed = (frame_logits * feat_mask).sum(dim=1)
-            # 각 샘플별 유효 프레임 개수(0으로 나누기 방지를 위해 최소 1로 clamp).
-            counts = feat_mask.sum(dim=1).clamp(min=1)
-            # 패딩을 제외한 "마스킹된 평균"으로 발화 전체 로짓을 얻는다.
-            logits = summed / counts                          # [B, C]
-        else:
-            # 마스크가 없는 경우(전부 유효한 배치 등)에는 단순 평균.
-            logits = frame_logits.mean(dim=1)
+        if self.head_type == "attentive":
+            # Attentive Statistics Pooling: 프레임 어텐션 가중치 α 로 가중 평균 μ 와
+            # 가중 표준편차 σ 를 구해 [μ; σ] 로 분류한다. 패딩 프레임은 마스킹된
+            # softmax 로 가중치 0 이 되어 자연히 제외된다.
+            scores = self.attn(hidden).squeeze(-1)            # [B, T]
+            if frame_mask is not None:
+                scores = scores.masked_fill(~frame_mask, float("-inf"))
+            alpha = torch.softmax(scores, dim=1).unsqueeze(-1)  # [B, T, 1]
+            mu = (alpha * hidden).sum(dim=1)                  # [B, H]
+            var = (alpha * hidden.pow(2)).sum(dim=1) - mu.pow(2)
+            sigma = torch.sqrt(var.clamp(min=1e-6))           # [B, H]
+            pooled = torch.cat([mu, sigma], dim=-1)           # [B, 2H]
+            logits = self.classifier(self.dropout(pooled))    # [B, C]
+            # attentive 헤드에서는 발화 로짓이 프레임 로짓의 단순 평균이 아니므로
+            # Level 2 프레임 히트맵(단일 선형 투영)이 성립하지 않는다 → None.
+        else:  # "mean"
+            # 인코더 표현에 드롭아웃 후 프레임별 선형 헤드를 적용해 프레임 로짓을 얻고,
+            # 패딩을 제외한 마스킹 평균으로 발화 전체 로짓을 얻는다(단일 선형이라
+            # "표현을 평균낸 뒤 헤드 적용"과 동일 → 프레임 히트맵을 공짜로 얻음).
+            frame_logits = self.classifier(self.dropout(hidden))  # [B, T, C]
+            if frame_mask is not None:
+                m = frame_mask.unsqueeze(-1)                  # [B, T, 1]
+                summed = (frame_logits * m).sum(dim=1)
+                counts = m.sum(dim=1).clamp(min=1)
+                logits = summed / counts                      # [B, C]
+            else:
+                logits = frame_logits.mean(dim=1)
 
         loss = None
         if labels is not None:
@@ -208,16 +291,66 @@ class AccentClassifier(nn.Module):
         return AccentOutput(
             loss=loss,
             logits=logits,
-            # 프레임 단위 출력은 요청했을 때만 반환(불필요한 메모리 사용 방지).
+            # 프레임 단위 출력은 요청 시 + mean 헤드일 때만 채워진다(불필요한 메모리 절약).
             frame_logits=frame_logits if output_frame_logits else None,
         )
 
 
-def build_config(model_name: str = MODEL_NAME) -> Wav2Vec2Config:
-    # 레이블 정보가 포함된 Wav2Vec2Config 객체를 생성해서 반환하는 헬퍼.
+def build_config(model_name: str = MODEL_NAME):
+    # 레이블 정보가 포함된 백본 config 객체를 생성해서 반환하는 헬퍼.
     # (모델 저장/공유 시 config만 별도로 필요할 때 사용)
-    cfg = Wav2Vec2Config.from_pretrained(model_name)
+    cfg = AutoConfig.from_pretrained(model_name)
     cfg.num_labels = NUM_LABELS
     cfg.id2label = {int(k): v for k, v in ID2LABEL.items()}
     cfg.label2id = dict(LABEL2ID)
     return cfg
+
+
+# --- architecture persistence / reload ---------------------------------------
+# 학습 때 쓴 아키텍처(백본·헤드·레이어가중·dropout)를 저장/복원하는 헬퍼.
+# infer.py / evaluate.py / model_tester 는 저장된 가중치와 정확히 같은 구조로
+# 모델을 재구성해야 load_state_dict 가 맞는다. 학습 시 write_model_config() 로
+# model_config.json 을 남기고, 로드 시 load_from_dir() 로 같은 구조를 만든다.
+MODEL_CONFIG_FILE = "model_config.json"
+
+
+def write_model_config(model_dir, *, backbone: str, num_labels: int,
+                       dropout: float, head: str, layer_weighting: bool) -> None:
+    """Persist the arch hyperparameters needed to rebuild this model for inference."""
+    cfg = {
+        "backbone": backbone,
+        "num_labels": num_labels,
+        "dropout": dropout,
+        "head": head,
+        "layer_weighting": layer_weighting,
+    }
+    with open(Path(model_dir) / MODEL_CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def load_from_dir(model_dir, num_labels: int | None = None) -> "AccentClassifier":
+    """Rebuild an AccentClassifier matching a saved checkpoint's architecture.
+
+    Reads ``model_config.json`` if present (backbone / head / layer_weighting);
+    falls back to the legacy default (wav2vec2-base, mean head, no layer
+    weighting) for models saved before that file existed. Builds the skeleton
+    with ``pretrained=False`` (weights are loaded by the caller). The backbone
+    weights come from the caller's ``load_state_dict``, so we never re-download.
+    """
+    # 저장된 체크포인트와 동일한 구조로 모델을 재구성한다. model_config.json 이
+    # 있으면 그 값을, 없으면(구버전) 레거시 기본값(wav2vec2-base/mean/가중없음)을 쓴다.
+    p = Path(model_dir) / MODEL_CONFIG_FILE
+    if p.exists():
+        cfg = json.loads(p.read_text())
+    else:
+        cfg = {}
+    backbone = cfg.get("backbone", MODEL_NAME)
+    n = num_labels if num_labels is not None else cfg.get("num_labels", NUM_LABELS)
+    return AccentClassifier(
+        backbone,
+        num_labels=n,
+        dropout=cfg.get("dropout", 0.1),
+        pretrained=False,
+        head=cfg.get("head", "mean"),
+        layer_weighting=cfg.get("layer_weighting", False),
+    )

@@ -1,0 +1,406 @@
+<title>Accent Classifier · us-west2 작업 리포트</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#f5f6f8; --surface:#ffffff; --surface-2:#eef0f4; --line:#dde1e8;
+    --ink:#161b22; --ink-2:#48505e; --muted:#7b8494;
+    --accent:#0e7c86;        /* audio teal */
+    --accent-2:#c9721f;      /* amber (2nd series) */
+    --good:#2f855a; --warn:#b5730f; --bad:#c0392b;
+    --mono:"Cascadia Code","SF Mono",ui-monospace,Consolas,"Liberation Mono",monospace;
+    --sans:"Segoe UI",system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
+    --r:10px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0e1116; --surface:#161b22; --surface-2:#1c222c; --line:#2a313c;
+      --ink:#e6e9ee; --ink-2:#aab3c0; --muted:#727d8c;
+      --accent:#3bb4c1; --accent-2:#e0913f;
+      --good:#48b07a; --warn:#d99a3a; --bad:#e0685c;
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#f5f6f8; --surface:#ffffff; --surface-2:#eef0f4; --line:#dde1e8;
+    --ink:#161b22; --ink-2:#48505e; --muted:#7b8494;
+    --accent:#0e7c86; --accent-2:#c9721f; --good:#2f855a; --warn:#b5730f; --bad:#c0392b;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0e1116; --surface:#161b22; --surface-2:#1c222c; --line:#2a313c;
+    --ink:#e6e9ee; --ink-2:#aab3c0; --muted:#727d8c;
+    --accent:#3bb4c1; --accent-2:#e0913f; --good:#48b07a; --warn:#d99a3a; --bad:#e0685c;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;
+    margin:0;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:960px;margin:0 auto;padding:clamp(20px,4vw,52px) clamp(16px,4vw,32px)}
+  header.masthead{border-bottom:1px solid var(--line);padding-bottom:22px;margin-bottom:8px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 10px}
+  h1{font-size:clamp(24px,4vw,34px);line-height:1.15;margin:0 0 12px;text-wrap:balance;letter-spacing:-.01em}
+  .sub{color:var(--ink-2);font-size:15px;max-width:62ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:16px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+  .meta b{color:var(--ink-2);font-weight:600}
+  h2{font-size:19px;margin:40px 0 4px;letter-spacing:-.01em;display:flex;align-items:baseline;gap:10px}
+  h2 .n{font-family:var(--mono);font-size:12px;color:var(--accent);font-weight:600}
+  h2 + .lede{color:var(--ink-2);font-size:14px;margin:0 0 18px}
+  h3{font-size:14px;margin:0 0 10px;color:var(--ink-2);font-family:var(--mono);letter-spacing:.02em}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:20px 22px}
+  .grid{display:grid;gap:14px}
+  @media(min-width:640px){.grid.two{grid-template-columns:1fr 1fr}}
+  /* status banner */
+  .banner{display:flex;gap:14px;align-items:flex-start;border-radius:var(--r);padding:16px 18px;
+    border:1px solid var(--line);background:var(--surface)}
+  .banner .dot{width:10px;height:10px;border-radius:50%;margin-top:6px;flex:none}
+  .banner.crit{border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
+  .banner.crit .dot{background:var(--bad)}
+  .banner .t{font-weight:600;font-size:15px;margin:0 0 3px}
+  .banner .d{color:var(--ink-2);font-size:13.5px;margin:0}
+  /* pipeline steps */
+  .steps{display:flex;flex-direction:column;gap:0}
+  .step{display:grid;grid-template-columns:26px 1fr auto;gap:12px;align-items:start;padding:11px 0;border-top:1px solid var(--line)}
+  .step:first-child{border-top:0}
+  .step .ic{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:12px;
+    font-family:var(--mono);color:#fff;margin-top:1px}
+  .ic.done{background:var(--good)} .ic.fail{background:var(--bad)} .ic.wip{background:var(--warn);color:#241a06}
+  .step .lab{font-size:14px} .step .lab small{display:block;color:var(--muted);font-family:var(--mono);font-size:11.5px;margin-top:2px}
+  .pill{font-family:var(--mono);font-size:11px;padding:3px 8px;border-radius:20px;white-space:nowrap;align-self:center}
+  .pill.done{color:var(--good);background:color-mix(in srgb,var(--good) 14%,transparent)}
+  .pill.fail{color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent)}
+  .pill.wip{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+  /* tables */
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  .scroll{overflow-x:auto}
+  th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;font-family:var(--mono)}
+  th:first-child,td:first-child{text-align:left;font-family:var(--sans)}
+  thead th{color:var(--muted);font-weight:600;font-size:11.5px;letter-spacing:.03em;text-transform:uppercase}
+  tbody tr:last-child td{border-bottom:0}
+  .chance{color:var(--muted)}
+  /* legend */
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:2px 0 14px;font-family:var(--mono)}
+  .legend span{display:inline-flex;align-items:center;gap:7px}
+  .sw{width:12px;height:12px;border-radius:3px;flex:none}
+  .fig{margin:0} .fig figcaption{color:var(--muted);font-size:12px;margin-top:9px;font-family:var(--mono)}
+  svg{width:100%;height:auto;display:block}
+  .axis{stroke:var(--line)} .grid-l{stroke:var(--line);stroke-dasharray:2 4;opacity:.7}
+  .tick{fill:var(--muted);font-family:var(--mono);font-size:10.5px}
+  .reflab{fill:var(--muted);font-family:var(--mono);font-size:10.5px}
+  .barlab{fill:var(--ink-2);font-family:var(--mono);font-size:10px}
+  /* changelog */
+  .log{list-style:none;padding:0;margin:0}
+  .log li{display:grid;grid-template-columns:auto 1fr;gap:14px;padding:12px 0;border-top:1px solid var(--line)}
+  .log li:first-child{border-top:0}
+  .log time{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
+  .log .body{font-size:13.5px;color:var(--ink-2)}
+  .log .body b{color:var(--ink)}
+  .tagrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
+  .tag{font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:5px;background:var(--surface-2);color:var(--ink-2)}
+  code{font-family:var(--mono);font-size:.9em;background:var(--surface-2);padding:1px 5px;border-radius:4px}
+  .callout{border-left:3px solid var(--accent);background:var(--surface-2);padding:12px 16px;border-radius:0 8px 8px 0;font-size:13.5px;color:var(--ink-2)}
+  .callout b{color:var(--ink)}
+  footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-family:var(--mono);font-size:11.5px}
+  .toggle{position:fixed;top:14px;right:14px;font-family:var(--mono);font-size:11px;color:var(--ink-2);
+    background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:6px 12px;cursor:pointer}
+  .toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  @media (prefers-reduced-motion:no-preference){.bar,.lp{transition:opacity .3s}}
+</style>
+
+<button class="toggle" id="tgl" aria-label="Toggle theme">◑ theme</button>
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="kicker">Vertex AI · region us-west2 · 진행 리포트</p>
+    <h1>영어 억양(국적) 분류기 — us-west2 재구축 &amp; 학습 파이프라인</h1>
+    <p class="sub">이 문서는 작업이 진행되는 동안 계속 갱신됩니다. 배포 파이프라인은 처음으로 끝까지 관통했지만,
+      학습된 모델이 무작위 수준에 머물러 현재 원인을 규명 중입니다.</p>
+    <div class="meta">
+      <span><b>프로젝트</b> qi-ucsd-project</span>
+      <span><b>버킷</b> gs://qi-ucsd-speech-usw2</span>
+      <span><b>클래스</b> US·UK·CA·AU·IN·CN</span>
+      <span><b>백본</b> wav2vec2-base</span>
+      <span><b>갱신</b> <span id="upd">2026-07-16 15:52</span></span>
+    </div>
+  </header>
+
+  <div class="banner" style="margin-top:26px;border-color:color-mix(in srgb,var(--good) 50%,var(--line))">
+    <span class="dot" style="background:var(--good)"></span>
+    <div>
+      <p class="t">현재 상태 — 해결됨 ✅ · 동작하는 모델 산출 (test 43.9%)</p>
+      <p class="d">버그 2개(pos_conv 랜덤 초기화 + gradient checkpointing gradient 끊김)를 모두 수정 →
+        train loss가 1.80→0.85로 <b>정상 하강</b>, <b>test accuracy 16.5% → 43.9%</b>(6클래스 무작위 16.7%),
+        붕괴하던 클래스 F1도 전부 회복. us-west2 T4 stockout은 us-central1 크로스리전 우회로 해결.
+        모델: <code>gs://qi-ucsd-speech-usc1/…/151914/model/</code></p>
+    </div>
+  </div>
+
+  <!-- 1. 파이프라인 -->
+  <h2><span class="n">01</span> 배포 파이프라인 진행 단계</h2>
+  <p class="lede">막혀 있던 두 지점(이미지 부재·잡 미제출)이 이번에 해소되어 처음으로 산출물이 생성됨.</p>
+  <div class="card">
+    <div class="steps" id="steps"></div>
+  </div>
+
+  <!-- 2. 데이터 -->
+  <h2><span class="n">02</span> 데이터셋 — 검증 완료(정상)</h2>
+  <p class="lede">6개 클래스 curated 풀 총 ~28,237클립(매니페스트 기준). 샘플 오디오 파형을 직접 확인 — 실제 음성이며 무음/손상 아님.</p>
+  <div class="grid two">
+    <div class="card fig">
+      <h3>클래스별 클립 수</h3>
+      <div id="clips"></div>
+      <figcaption>학습 시 <code>--per-class 300</code>으로 언더샘플링 → 화자분리 70/15/15 분할(train 1,231 · val 295 · test 316).</figcaption>
+    </div>
+    <div class="card">
+      <h3>오디오 파형 점검 (GLOBE .flac)</h3>
+      <div class="scroll"><table>
+        <thead><tr><th>클립</th><th>sr</th><th>길이</th><th>std</th><th>비무음</th></tr></thead>
+        <tbody>
+          <tr><td>US · glb_S_000115…</td><td>24k</td><td>2.9s</td><td>0.073</td><td>99.3%</td></tr>
+          <tr><td>CN · glb_S_000297…</td><td>24k</td><td>3.6s</td><td>0.064</td><td>99.4%</td></tr>
+        </tbody>
+      </table></div>
+      <p class="callout" style="margin-top:14px">진폭 분산이 정상이고 99% 이상이 비무음 → <b>입력 데이터는 건강함</b>.
+        따라서 무작위 성능의 원인은 데이터가 아니다.</p>
+    </div>
+  </div>
+
+  <!-- 3. 학습 결과 -->
+  <h2><span class="n">03</span> 학습 결과 — 버그 수정 후 정상 동작</h2>
+  <p class="lede">6클래스 무작위 기대치는 16.7%. 초기 두 잡(버그)은 이를 못 넘었으나,
+    <b>수정 후(Run 3) test 43.9%</b>로 도약하고 붕괴하던 클래스 F1도 전부 회복.</p>
+
+  <div class="legend">
+    <span><i class="sw" style="background:var(--accent)"></i>Run 1 — head-only (버그)</span>
+    <span><i class="sw" style="background:var(--accent-2)"></i>Run 2 — unfreeze-4 (버그)</span>
+    <span><i class="sw" style="background:var(--good)"></i>Run 3 — 수정 후 unfreeze-6</span>
+    <span><i class="sw" style="background:var(--muted);height:0;border-top:2px dashed var(--muted);border-radius:0"></i>무작위 16.7%</span>
+  </div>
+
+  <div class="grid two">
+    <div class="card fig">
+      <h3>정확도 (val / test)</h3>
+      <div id="acc"></div>
+      <figcaption>test 정확도: Run 1 16.5% · Run 2 18.7%(우연) → <b>Run 3 43.9%</b>(수정 후).</figcaption>
+    </div>
+    <div class="card fig">
+      <h3>클래스별 test F1</h3>
+      <div id="f1"></div>
+      <figcaption>버그 땐 F1=0 붕괴(Run 1 CA / Run 2 UK·AU). 수정 후(초록) 전 클래스 0.30~0.55로 회복.</figcaption>
+    </div>
+  </div>
+
+  <div class="card scroll" style="margin-top:14px">
+    <table>
+      <thead><tr><th>지표</th><th>Run 1 · head-only</th><th>Run 2 · unfreeze-4</th><th>Run 3 · 수정 후</th><th>무작위</th></tr></thead>
+      <tbody>
+        <tr><td>val accuracy</td><td>26.1%</td><td>16.3%</td><td><b>37.1%</b></td><td class="chance">16.7%</td></tr>
+        <tr><td>val macro-F1</td><td>0.207</td><td>0.110</td><td><b>0.356</b></td><td class="chance">≈0.17</td></tr>
+        <tr><td>test accuracy</td><td>16.5%</td><td>18.7%</td><td><b>43.9%</b></td><td class="chance">16.7%</td></tr>
+        <tr><td>test macro-F1</td><td>0.139</td><td>0.120</td><td><b>0.437</b></td><td class="chance">≈0.17</td></tr>
+        <tr><td>train loss(끝)</td><td>~1.79</td><td>~1.79</td><td><b>0.85</b></td><td class="chance">—</td></tr>
+        <tr><td>리전 / 데이터</td><td>usw2</td><td>usw2</td><td>usc1(우회)</td><td class="chance">—</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 4. 스몰건 -->
+  <h2><span class="n">04</span> 결정적 신호 — 손실 곡선 (수정 전 vs 후)</h2>
+  <p class="lede">수정 전: 28M 파라미터를 언프리즈해도 train loss가 ln(6)=1.79 천장에 고정(훈련 데이터조차 못 맞춤).
+    수정 후: 두 버그를 잡자 손실이 <b>1.80 → 0.85로 정상 하강</b> — 모델이 실제로 학습됨.</p>
+  <div class="card fig">
+    <h3>학습 손실 곡선 — 버그 수정 전후</h3>
+    <div id="loss"></div>
+    <figcaption>회색(수정 전)은 무작위 천장 ln(6)에 붙어 못 내려옴. 초록(수정 후)은 0.85까지 하강 —
+      pos_conv 로딩 + gradient checkpointing 수정 후 백본이 살아나 학습이 진행됨.</figcaption>
+  </div>
+
+  <!-- 5. 진단 -->
+  <h2><span class="n">05</span> 확정된 원인(버그 2개) &amp; 적용한 수정</h2>
+  <div class="grid two">
+    <div class="card">
+      <h3>버그 ① pos_conv 랜덤 초기화</h3>
+      <p class="callout" style="margin:0 0 10px"><code>transformers 4.44.2</code>+<code>torch 2.4.1</code>이 신형
+        <code>parametrizations.weight_norm</code>(<code>original0/1</code>)을 쓰는데 <code>wav2vec2-base</code> 체크포인트는
+        구형 <code>weight_g/weight_v</code> → 키 불일치로 pos_conv 미로드(랜덤). (HF #27605)</p>
+      <p style="font-size:13px;color:var(--ink-2);margin:0"><b>수정:</b> <code>_legacy_weight_norm()</code>로 구형 weight_norm 강제.
+        <b>결과:</b> 경고는 사라졌으나 과적합은 여전히 실패 → 이것만으론 부족.</p>
+    </div>
+    <div class="card">
+      <h3>버그 ② gradient checkpointing (진짜 병목)</h3>
+      <p class="callout" style="margin:0 0 10px;border-left-color:var(--bad)">백본 config의
+        <code>gradient_checkpointing=True</code>가 자동 활성화 + <b>reentrant 모드</b>. 하위 동결 레이어의
+        체크포인트 입력이 grad를 요구하지 않아 <b>gradient가 조용히 끊김</b>("Gradients will be None") →
+        언프리즈한 상위 레이어가 학습되지 않음.</p>
+      <p style="font-size:13px;color:var(--ink-2);margin:0"><b>수정:</b> 백본 checkpointing 강제 OFF +
+        학습 전 across-clip 피처 분산 계측 추가. 재빌드 후 tiny-overfit 재검증 중 —
+        <b>loss가 0으로 붕괴하면 성공.</b></p>
+    </div>
+  </div>
+
+  <!-- 6. 변경 이력 -->
+  <h2><span class="n">06</span> 변경 이력 (지속 갱신)</h2>
+  <p class="lede">이 섹션은 작업이 진행될 때마다 새 항목이 위에 추가됩니다.</p>
+  <div class="card">
+    <ul class="log" id="log"></ul>
+  </div>
+
+  <footer>
+    자동 생성 작업 리포트 · qi-ucsd-project / us-west2 · 실측값은 Vertex 잡 로그와 GCS 산출물에서 수집.
+    수치가 매니페스트/로그와 다르면 로그를 신뢰.
+  </footer>
+</div>
+
+<script>
+// ---------- theme toggle ----------
+const root=document.documentElement, tgl=document.getElementById('tgl');
+tgl.onclick=()=>{const d=getComputedStyle(root).getPropertyValue('--bg').trim();
+  const dark=window.matchMedia('(prefers-color-scheme:dark)').matches;
+  const cur=root.getAttribute('data-theme')|| (dark?'dark':'light');
+  root.setAttribute('data-theme',cur==='dark'?'light':'dark');
+  setTimeout(drawAll,20);};
+
+// ---------- helpers ----------
+const cv=v=>getComputedStyle(root).getPropertyValue(v).trim();
+const NS='http://www.w3.org/2000/svg';
+function el(t,a){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;}
+function svg(w,h){const s=el('svg',{viewBox:`0 0 ${w} ${h}`,role:'img'});s.style.overflow='visible';return s;}
+
+// ---------- pipeline steps ----------
+const STEPS=[
+  ['데이터셋 6클래스 구축','curated/ US·UK·CA·AU·IN·CN · 8,129클립','done','완료'],
+  ['T4 GPU 쿼터','us-west2 custom-training T4 ×1','done','확보'],
+  ['컨테이너 이미지 빌드/푸시','accent-classifier@sha256:fe184a3 · Cloud Build 11m','done','완료'],
+  ['학습 잡 #1 (head-only)','accent-classifier-…085042 · 8 epochs','done','SUCCEEDED'],
+  ['학습 잡 #2 (unfreeze-4)','accent-classifier-…100403 · 6 epochs','done','SUCCEEDED'],
+  ['모델 품질 (초기 2잡)','두 잡 모두 홀드아웃 우연 수준','fail','FAILING'],
+  ['버그 ① pos_conv 랜덤 초기화','weight_norm 키 불일치 → 구형 강제 로딩','done','수정됨'],
+  ['버그 ② gradient checkpointing','자동 활성화 + reentrant로 gradient 끊김 → OFF','done','수정됨'],
+  ['us-west2 T4 stockout','재고 소진 반복 → us-central1 크로스리전 우회','done','우회'],
+  ['재빌드 & 재학습 (us-central1)','2차 수정본으로 실학습','done','완료'],
+  ['모델 산출','test 43.9% / macro-F1 0.437 · loss 0.85','done','성공'],
+  ['모델 테스터 배포','Cloud Run us-west2 · MODEL_ROOT→usc1 · 새 모델 노출','done','배포됨'],
+];
+const sc=document.getElementById('steps');
+STEPS.forEach(([l,s,st,p])=>{
+  const row=document.createElement('div');row.className='step';
+  const ic={done:'✓',fail:'✕',wip:'▶'}[st];
+  row.innerHTML=`<span class="ic ${st}">${ic}</span>
+    <span class="lab">${l}<small>${s}</small></span>
+    <span class="pill ${st}">${p}</span>`;
+  sc.appendChild(row);
+});
+
+// ---------- changelog ----------
+const LOG=[
+  ['07-16 · 15:52','<b>모델 테스터 새로고침.</b> Cloud Run <code>accent-model-tester</code>(us-west2, URL 유지)를 수정 코드로 재배포하고 <code>MODEL_ROOT</code>→usc1로 변경. 서비스 헬스 OK, 저장 체크포인트가 legacy weight_norm 키(weight_g/weight_v)로 저장됨을 확인 → 추론 로딩 호환 보장. 브라우저 로그인 시 새 모델(test 43.9%) 노출.',['deploy','tester']],
+  ['07-16 · 15:37','<b>✅ 해결 — 동작하는 모델 산출.</b> us-central1 실학습에서 train loss 1.80→0.85 정상 하강, <b>test acc 43.9% / macro-F1 0.437</b>(무작위 16.7%), 전 클래스 F1 회복. 경고 2종 모두 소멸, <code>[diag] across-clip std=0.075</code>로 피처 정상. 모델: <code>usc1/…/151914/model</code>.',['success','model']],
+  ['07-16 · 15:00','<b>us-central1 콜로케이션.</b> us-west2 T4 재고 반복 소진 → 잡 출력 버킷은 잡 리전과 동일해야 하는 제약 때문에 curated(2.68GB)를 us-central1 버킷으로 복사, 이미지도 재빌드. (영구책은 US 멀티리전 버킷 — 예정)',['infra','region']],
+  ['07-16 · 12:10','<b>2차 수정 적용 & 재빌드.</b> <code>model.py</code>에서 백본 gradient checkpointing 강제 OFF, <code>train.py</code>에 across-clip 피처 분산 계측 추가.',['fix','grad-flow']],
+  ['07-16 · 12:05','<b>2번째 진범 발견 — gradient checkpointing.</b> 요청 안 했는데 config에서 자동 활성화 + reentrant 모드로 하위 동결 레이어에서 gradient 끊김. 상위 언프리즈 레이어가 학습 안 됨. pos_conv 수정만으론 부족했던 이유.',['root-cause','grad-flow']],
+  ['07-16 · 11:03','<b>1차 수정 검증 → 부분 성공.</b> pos_conv 경고는 사라짐(로딩 정상화). 그러나 tiny-overfit 여전히 실패(loss 1.80→1.67) → pos_conv은 진범 아님. 계속 파고듦.',['verify','partial']],
+  ['07-16 · 10:30','<b>1차 이미지 재빌드.</b> 구형 weight_norm 수정본 빌드/푸시 완료(5분).',['rebuild']],
+  ['07-16 · 10:26','<b>수정 적용.</b> <code>model.py</code>에 <code>_legacy_weight_norm()</code> 컨텍스트 추가 — 학습·추론 양쪽에서 구형 weight_norm(weight_g/weight_v)을 강제해 pos_conv 체크포인트 키를 일치. 문법 검증 통과.',['fix','pos_conv']],
+  ['07-16 · 10:24','<b>tiny-overfit 진단 완료 → 백본 손상 확정.</b> 113클립·42.5M·60에폭인데 train loss가 1.80→1.67에서 정체. 작은 셋조차 못 외움 = pos_conv 랜덤 초기화가 진범(경고는 스퓨리어스 아님).',['diagnose','root-cause']],
+  ['07-16 · 10:07','<b>인프라 이슈 자동 복구.</b> us-west2 T4 재고 일시 소진으로 진단 잡 ~40분 PENDING → 재고 회복되어 RUNNING 전환(재제출 불필요).',['infra','t4']],
+  ['07-16 · 08:58','<b>근본원인 후보 확정.</b> 잡 로그에서 pos_conv_embed 랜덤 초기화 경고 발견 · 오디오 파형 정상 확인 · loss가 ln(6) 고정임을 trainer_state에서 확인.',['root-cause','data-ok']],
+  ['07-16 · 08:50','<b>학습 잡 #2 (unfreeze-4) 완료.</b> test acc 18.7% / macro-F1 0.120 — 여전히 우연 수준. CA·IN만 F1↑, UK·AU 붕괴.',['run-2','fail']],
+  ['07-16 · 08:50','<b>학습 잡 #1 (head-only) 완료.</b> test acc 16.5% / macro-F1 0.139. 첫 end-to-end 산출물 생성.',['run-1','fail']],
+  ['07-16 · 08:50','<b>이미지 빌드/푸시 성공.</b> Artifact Registry repo 생성 + Cloud Build 11분. us-west2 최초 이미지.',['build','done']],
+  ['07-16 · 08:40','<b>착수.</b> us-west2 상태 점검 — 데이터셋은 구축돼 있으나 이미지·잡·산출물 전무. 이전 학습은 us-central1에만 존재.',['audit']],
+];
+const lg=document.getElementById('log');
+LOG.forEach(([t,b,tags])=>{
+  const li=document.createElement('li');
+  li.innerHTML=`<time>${t}</time><div class="body">${b}
+    <div class="tagrow">${tags.map(x=>`<span class="tag">${x}</span>`).join('')}</div></div>`;
+  lg.appendChild(li);
+});
+
+// ---------- charts ----------
+function barChart(mount,data,opts){ // data:[{label,groups:[v1,v2]}]
+  mount.innerHTML='';
+  const W=440,H=250,ml=38,mr=10,mt=12,mb=42;
+  const s=svg(W,H); const iw=W-ml-mr, ih=H-mt-mb;
+  const max=opts.max||1, cols=[cv('--accent'),cv('--accent-2'),cv('--good')];
+  // gridlines
+  for(let i=0;i<=opts.ticks;i++){const y=mt+ih-ih*(i/opts.ticks);const val=(max*i/opts.ticks);
+    s.appendChild(el('line',{x1:ml,y1:y,x2:W-mr,y2:y,class:'grid-l'}));
+    s.appendChild(Object.assign(el('text',{x:ml-6,y:y+3,'text-anchor':'end',class:'tick'}),{textContent:opts.fmt(val)}));}
+  // chance line
+  if(opts.chance!=null){const y=mt+ih-ih*(opts.chance/max);
+    s.appendChild(el('line',{x1:ml,y1:y,x2:W-mr,y2:y,stroke:cv('--muted'),'stroke-width':1.5,'stroke-dasharray':'5 4'}));
+    s.appendChild(Object.assign(el('text',{x:W-mr,y:y-5,'text-anchor':'end',class:'reflab'}),{textContent:opts.chanceLab}));}
+  const n=data.length, gw=iw/n, ng=data[0].groups.length;
+  const bw=Math.min(26,(gw*0.62)/ng);
+  data.forEach((d,i)=>{
+    const cx=ml+gw*i+gw/2;
+    d.groups.forEach((v,g)=>{
+      const x=cx-(ng*bw+ (ng-1)*4)/2 + g*(bw+4);
+      const h=ih*(v/max), y=mt+ih-h;
+      const r=el('rect',{x,y,width:bw,height:Math.max(h,0.5),rx:3,fill:cols[g],class:'bar'});
+      s.appendChild(r);
+      s.appendChild(Object.assign(el('text',{x:x+bw/2,y:y-4,'text-anchor':'middle',class:'barlab'}),{textContent:opts.blab(v)}));
+    });
+    s.appendChild(Object.assign(el('text',{x:cx,y:H-mb+16,'text-anchor':'middle',class:'tick'}),{textContent:d.label}));
+    if(d.sub) s.appendChild(Object.assign(el('text',{x:cx,y:H-mb+29,'text-anchor':'middle',class:'reflab'}),{textContent:d.sub}));
+  });
+  s.appendChild(el('line',{x1:ml,y1:mt+ih,x2:W-mr,y2:mt+ih,class:'axis'}));
+  mount.appendChild(s);
+}
+
+function lineChart(mount,series,ref,opts){
+  mount.innerHTML='';
+  const W=880,H=280,ml=44,mr=16,mt=16,mb=40;
+  const s=svg(W,H),iw=W-ml-mr,ih=H-mt-mb;
+  const xmin=0,xmax=opts.xmax,ymin=opts.ymin,ymax=opts.ymax;
+  const X=x=>ml+iw*(x-xmin)/(xmax-xmin), Y=y=>mt+ih-ih*(y-ymin)/(ymax-ymin);
+  for(let i=0;i<=opts.yticks;i++){const yv=ymin+(ymax-ymin)*i/opts.yticks,y=Y(yv);
+    s.appendChild(el('line',{x1:ml,y1:y,x2:W-mr,y2:y,class:'grid-l'}));
+    s.appendChild(Object.assign(el('text',{x:ml-7,y:y+3,'text-anchor':'end',class:'tick'}),{textContent:yv.toFixed(2)}));}
+  for(let e=0;e<=opts.xmax;e++){const x=X(e);
+    s.appendChild(Object.assign(el('text',{x,y:H-mb+16,'text-anchor':'middle',class:'tick'}),{textContent:e}));}
+  s.appendChild(Object.assign(el('text',{x:ml+iw/2,y:H-4,'text-anchor':'middle',class:'reflab'}),{textContent:'epoch'}));
+  // reference line ln(6)
+  const ry=Y(ref.v);
+  s.appendChild(el('line',{x1:ml,y1:ry,x2:W-mr,y2:ry,stroke:cv('--bad'),'stroke-width':1.5,'stroke-dasharray':'6 4',opacity:.8}));
+  s.appendChild(Object.assign(el('text',{x:ml+6,y:ry-6,class:'reflab',fill:cv('--bad')}),{textContent:ref.lab}));
+  // series
+  series.forEach(ser=>{
+    const path=ser.pts.map((p,i)=>(i?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1)).join(' ');
+    s.appendChild(el('path',{d:path,fill:'none',stroke:ser.color,'stroke-width':2.4,'stroke-dasharray':ser.dash||'',class:'lp','stroke-linejoin':'round'}));
+    ser.pts.forEach(p=>s.appendChild(el('circle',{cx:X(p[0]),cy:Y(p[1]),r:3.3,fill:ser.color,stroke:cv('--surface'),'stroke-width':1.5})));
+  });
+  s.appendChild(el('line',{x1:ml,y1:mt+ih,x2:W-mr,y2:mt+ih,class:'axis'}));
+  s.appendChild(el('line',{x1:ml,y1:mt,x2:ml,y2:mt+ih,class:'axis'}));
+  // legend
+  const lg=[['수정 전 (정체)',cv('--muted'),''],['수정 후 (하강)',cv('--good'),'']];
+  lg.forEach((L,i)=>{const gx=W-mr-150+i*80,gy=mt+2;
+    s.appendChild(el('line',{x1:gx,y1:gy,x2:gx+18,y2:gy,stroke:L[1],'stroke-width':2.4,'stroke-dasharray':L[2]}));
+    s.appendChild(Object.assign(el('text',{x:gx+23,y:gy+3,class:'reflab'}),{textContent:L[0]}));});
+  mount.appendChild(s);
+}
+
+function drawAll(){
+  // clips per class
+  barChart(document.getElementById('clips'),[
+    {label:'US',groups:[6243]},{label:'UK',groups:[5933]},{label:'CA',groups:[6002]},
+    {label:'AU',groups:[4825]},{label:'IN',groups:[4064]},{label:'CN',groups:[1170]},
+  ],{max:6500,ticks:4,chance:null,fmt:v=>Math.round(v),blab:v=>v});
+  // accuracy — grouped by run (teal=Run1, amber=Run2), consistent with F1 chart
+  barChart(document.getElementById('acc'),[
+    {label:'val accuracy',groups:[26.1,16.3,37.1]},
+    {label:'test accuracy',groups:[16.5,18.7,43.9]},
+  ],{max:50,ticks:5,chance:16.7,chanceLab:'chance 16.7%',fmt:v=>v.toFixed(0)+'%',blab:v=>v.toFixed(1)+'%'});
+  // per-class F1
+  barChart(document.getElementById('f1'),[
+    {label:'US',groups:[0.065,0.034,0.304]},{label:'UK',groups:[0.238,0.000,0.372]},{label:'CA',groups:[0.000,0.281,0.545]},
+    {label:'AU',groups:[0.183,0.000,0.406]},{label:'IN',groups:[0.143,0.279,0.554]},{label:'CN',groups:[0.207,0.125,0.442]},
+  ],{max:0.6,ticks:3,fmt:v=>v.toFixed(1),blab:v=>v.toFixed(2)});
+  // loss curve
+  lineChart(document.getElementById('loss'),[
+    {color:cv('--muted'),pts:[[0.65,1.7996],[1.30,1.792],[1.95,1.7938],[2.60,1.7877],[3.25,1.7943],[3.90,1.7894],[4.55,1.7869],[5.19,1.7916],[5.84,1.7887],[9,1.789]]},
+    {color:cv('--good'),pts:[[0.65,1.7977],[1.0,1.7786],[1.3,1.7363],[2.6,1.6243],[3.0,1.4801],[3.25,1.3674],[4.55,1.27],[5.0,1.1795],[5.19,1.0827],[6.49,1.0159],[7.0,0.9872],[7.14,0.9302],[8.44,0.8531],[9.09,0.8709]]},
+  ],{v:1.7918,lab:'ln(6)=1.79 · 무작위 천장'},
+    {xmax:9,ymin:0.80,ymax:1.85,yticks:5});
+}
+drawAll();
+window.addEventListener('resize',()=>{clearTimeout(window._t);window._t=setTimeout(drawAll,150);});
+</script>

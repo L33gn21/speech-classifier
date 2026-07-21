@@ -47,10 +47,10 @@ import numpy as np
 import torch
 from flask import Flask, jsonify, redirect, request, session, url_for
 from google.cloud import storage
-from transformers import Wav2Vec2FeatureExtractor
+from transformers import AutoFeatureExtractor
 
-from config import LABELS, MODEL_NAME, SAMPLE_RATE
-from model import AccentClassifier
+from config import LABELS, SAMPLE_RATE
+from model import AccentClassifier, load_from_dir
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
@@ -231,14 +231,16 @@ def get_model(job: str):
         labels = json.loads(cfg.read_text())["labels"]
 
     # 백본은 config로만 짓고(HF 재다운로드 없음) 우리 safetensors로 덮어쓴다.
-    model = AccentClassifier(MODEL_NAME, num_labels=len(labels), pretrained=False)
+    # load_from_dir 가 model_config.json 을 읽어 학습 때와 동일한 백본·헤드·
+    # 레이어가중 구조로 골격을 만든다(구버전 체크포인트는 레거시 기본값으로 폴백).
+    model = load_from_dir(model_dir, num_labels=len(labels))
     from safetensors.torch import load_file
 
     state = load_file(str(model_dir / "model.safetensors"))
     model.load_state_dict(state)
     model.eval()
 
-    fe = Wav2Vec2FeatureExtractor.from_pretrained(model_dir)
+    fe = AutoFeatureExtractor.from_pretrained(model_dir)
     loaded = (model, fe, labels)
     with _model_lock:
         _models[job] = loaded

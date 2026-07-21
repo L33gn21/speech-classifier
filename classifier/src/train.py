@@ -45,10 +45,10 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
 )
 from transformers import (
+    AutoFeatureExtractor,
     EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
-    Wav2Vec2FeatureExtractor,
 )
 
 from config import (
@@ -63,7 +63,7 @@ from config import (
     VAL_FRACTION,
 )
 from dataset import AccentDataset, DataCollator
-from model import AccentClassifier
+from model import AccentClassifier, write_model_config
 from prepare_data import build_splits, report
 
 
@@ -220,9 +220,46 @@ def main() -> None:
                     help="light waveform augmentation (gain + noise) on the train split")
     # 학습 분할에만 경량 파형 증강(랜덤 게인 + 가우시안 노이즈)을 적용해 채널
     # confound(GLOBE vs SAA) 에 대한 강건성을 높인다.
+    ap.add_argument("--aug-strength", "--aug_strength", dest="aug_strength",
+                    type=float, default=0.0,
+                    help="with --augment, use domain-randomization augmentation at "
+                         "this strength (0=legacy light aug; ~1.0=full). Simulates "
+                         "the GLOBE->VoxForge recording-domain shift (speed/band-limit/"
+                         "reverb/colored-noise) to fight source-domain overfitting.")
+    # --augment 와 함께 쓸 때 도메인 랜덤화 증강 세기. 0 이면 레거시 경량 증강,
+    # ~1.0 이면 풀 세기. GLOBE→VoxForge 녹음 도메인 시프트(속도·대역제한·잔향·컬러노이즈)
+    # 를 흉내내 소스 도메인 과적합을 줄인다(대책 C, CA→US 붕괴의 도메인시프트 절반 겨냥).
+    ap.add_argument("--save-total-limit", "--save_total_limit", dest="save_total_limit",
+                    type=int, default=2,
+                    help="max checkpoints to keep (default 2). Raise to keep every "
+                         "epoch for a checkpoint scan (e.g. OOD-optimal early-stopping).")
+    # 보관할 체크포인트 최대 개수(기본 2). 매 epoch 체크포인트를 남겨 OOD(VoxForge) 최적
+    # 정지점을 스캔하려면 크게 준다(예: epochs 이상).
     ap.add_argument("--hypertune", action="store_true",
                     help="report eval_macro_f1 to Vertex AI Vizier (HP tuning jobs)")
     # Vertex AI Hyperparameter Tuning(Vizier) 잡에서 trial 점수를 보고할 때만 켠다.
+    # --- architecture knobs (v3 experiments) ---------------------------------
+    ap.add_argument("--backbone", "--model-name", "--model_name", dest="backbone",
+                    default=MODEL_NAME,
+                    help="pretrained backbone (e.g. facebook/wav2vec2-base or "
+                         "microsoft/wavlm-base-plus)")
+    # 백본 교체용. AutoModel 이 이름으로 wav2vec2/wavlm 을 자동 선택한다.
+    ap.add_argument("--head", "--head_type", dest="head",
+                    choices=["mean", "attentive"], default="mean",
+                    help="utterance pooling head: mean (masked mean) | attentive "
+                         "(attentive statistics pooling: weighted mean+std)")
+    # 발화 풀링 헤드 선택: mean(마스킹 평균) | attentive(어텐션 가중 평균+표준편차).
+    ap.add_argument("--layer-weighting", "--layer_weighting", dest="layer_weighting",
+                    action="store_true",
+                    help="learned weighted sum over all backbone layers (SUPERB-style)")
+    # 전 백본 레이어 은닉상태의 학습가능 가중합을 표현으로 사용(SUPERB식).
+    ap.add_argument("--mask-time-prob", "--mask_time_prob", dest="mask_time_prob",
+                    type=float, default=None,
+                    help="SpecAugment time-mask prob (None=backbone default ~0.05)")
+    ap.add_argument("--mask-feature-prob", "--mask_feature_prob", dest="mask_feature_prob",
+                    type=float, default=None,
+                    help="SpecAugment feature-mask prob (None=backbone default)")
+    # 백본 내장 SpecAugment 세기(학습 시 특징 시간/채널 마스킹). None 이면 백본 기본값.
     args = ap.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -253,18 +290,29 @@ def main() -> None:
     for name, part in [("train", train_df), ("val", val_df), ("test", test_df)]:
         part[cols].to_csv(os.path.join(manifest_out, f"{name}.csv"), index=False)
 
-    # Wav2Vec2 입력 전처리기(정규화 담당)와, 이를 사용하는 배치 콜레이터 준비.
-    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
+    # 입력 전처리기(정규화 담당)와, 이를 사용하는 배치 콜레이터 준비. AutoFeatureExtractor
+    # 라 wav2vec2/wavlm 어느 백본이든 맞는 전처리기를 자동으로 불러온다.
+    feature_extractor = AutoFeatureExtractor.from_pretrained(args.backbone)
     collator = DataCollator(feature_extractor)
 
     train_ds = AccentDataset(train_df, curated_root=args.curated_root,
-                             augment=args.augment)
+                             augment=args.augment, aug_strength=args.aug_strength)
     eval_ds = AccentDataset(val_df, curated_root=args.curated_root)
     test_ds = AccentDataset(test_df, curated_root=args.curated_root)
+    aug_kind = ("domain" if args.augment and args.aug_strength > 0
+                else "legacy" if args.augment else "off")
     print(f"train={len(train_ds)}  val={len(eval_ds)}  test={len(test_ds)}"
-          f"  augment={args.augment}")
+          f"  augment={args.augment}  aug={aug_kind}(strength={args.aug_strength})")
 
-    model = AccentClassifier(MODEL_NAME, dropout=args.dropout)
+    model = AccentClassifier(args.backbone, dropout=args.dropout,
+                             head=args.head, layer_weighting=args.layer_weighting)
+    print(f"backbone={args.backbone}  head={args.head}  "
+          f"layer_weighting={args.layer_weighting}")
+    if args.mask_time_prob is not None or args.mask_feature_prob is not None:
+        # 백본 내장 SpecAugment 세기를 조절(학습 시에만 적용됨).
+        model.set_spec_augment(args.mask_time_prob, args.mask_feature_prob)
+        print(f"spec-augment: mask_time_prob={args.mask_time_prob} "
+              f"mask_feature_prob={args.mask_feature_prob}")
     if args.unfreeze_top > 0:
         # 백본의 상위 N개 레이어까지 함께 파인튜닝하는 모드.
         model.unfreeze_top_layers(args.unfreeze_top)
@@ -320,7 +368,7 @@ def main() -> None:
         load_best_model_at_end=True,       # 학습 종료 시 가장 좋은 체크포인트를 로드
         metric_for_best_model="macro_f1",  # "가장 좋다"의 기준은 매크로 F1
         greater_is_better=True,
-        save_total_limit=2,   # 디스크 절약을 위해 최근 2개 체크포인트만 보관
+        save_total_limit=args.save_total_limit,   # 기본 2(디스크 절약). 스캔 시 상향.
         dataloader_num_workers=4,
         remove_unused_columns=False,  # our model consumes raw batch dict
         # HF Trainer는 기본적으로 모델 forward 시그니처에 없는 배치 컬럼을 자동
@@ -381,6 +429,17 @@ def main() -> None:
     test_metrics = test_out.metrics
     print("final test eval:", json.dumps(test_metrics, indent=2))
     metrics = {**val_metrics, **test_metrics}
+    # 재현/추적용으로 이 잡의 증강 설정을 함께 남긴다(추가 키라 대시보드 스키마에 안전).
+    metrics["train_config"] = {
+        "augment": bool(args.augment),
+        "aug_strength": float(args.aug_strength),
+        "aug_kind": aug_kind,
+        "backbone": args.backbone,
+        "head": args.head,
+        "unfreeze_top": args.unfreeze_top,
+        "per_class": args.per_class,
+        "epochs": args.epochs,
+    }
     # 나라별 상세 지표 + 혼동 행렬을 (val/test 각각) 중첩 키로 함께 저장한다.
     metrics["eval_detail"] = detailed_report(
         np.argmax(val_out.predictions, axis=-1), val_out.label_ids)
@@ -395,6 +454,11 @@ def main() -> None:
     feature_extractor.save_pretrained(args.output_dir)
     with open(os.path.join(args.output_dir, "label_config.json"), "w") as f:
         json.dump({"labels": LABELS, "id2label": ID2LABEL}, f, indent=2)
+    # 추론 측(infer/evaluate/model_tester)이 저장 가중치와 동일한 구조로 모델을
+    # 재구성할 수 있도록 아키텍처 하이퍼파라미터를 함께 남긴다.
+    write_model_config(
+        args.output_dir, backbone=args.backbone, num_labels=len(LABELS),
+        dropout=args.dropout, head=args.head, layer_weighting=args.layer_weighting)
     with open(os.path.join(args.output_dir, "final_metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"saved to {args.output_dir}")

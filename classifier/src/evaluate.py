@@ -26,16 +26,18 @@ import numpy as np
 import torch
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from torch.utils.data import DataLoader
-from transformers import Wav2Vec2FeatureExtractor
+from transformers import AutoFeatureExtractor
 
-from config import CURATED_ROOT, LABELS, MODEL_NAME, OUTPUT_DIR
+from config import CURATED_ROOT, LABELS, OUTPUT_DIR
 from dataset import AccentDataset, DataCollator
-from model import AccentClassifier
+from model import AccentClassifier, load_from_dir
 
 
 def load_trained(model_dir: str) -> AccentClassifier:
     # 저장된 모델 디렉터리에서 가중치를 불러와 평가 모드(eval)의 모델을 반환.
-    model = AccentClassifier(MODEL_NAME)
+    # load_from_dir 가 model_config.json 을 읽어 학습 때와 동일한 구조(백본·헤드·
+    # 레이어가중)로 골격을 만든다(구버전은 레거시 기본값으로 폴백).
+    model = load_from_dir(model_dir)
     safepath = os.path.join(model_dir, "model.safetensors")
     binpath = os.path.join(model_dir, "pytorch_model.bin")
     if os.path.exists(safepath):
@@ -69,7 +71,7 @@ def main() -> None:
     # GPU가 있으면 GPU를 사용, 없으면 CPU로 자동 전환.
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_trained(args.model_dir).to(device)
-    fe = Wav2Vec2FeatureExtractor.from_pretrained(args.model_dir)
+    fe = AutoFeatureExtractor.from_pretrained(args.model_dir)
     collator = DataCollator(fe)
 
     test_ds = AccentDataset(os.path.join(manifest_dir, "test.csv"),

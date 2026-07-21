@@ -24,18 +24,20 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from transformers import Wav2Vec2FeatureExtractor
+from transformers import AutoFeatureExtractor
 
-from config import LABELS, MODEL_NAME, OUTPUT_DIR, SAMPLE_RATE
+from config import LABELS, OUTPUT_DIR, SAMPLE_RATE
 from dataset import load_audio
-from model import AccentClassifier
+from model import AccentClassifier, load_from_dir
 
 
-def load_trained(model_dir: Path) -> tuple[AccentClassifier, Wav2Vec2FeatureExtractor, list[str]]:
+def load_trained(model_dir: Path) -> tuple[AccentClassifier, "AutoFeatureExtractor", list[str]]:
     # 저장된 모델 디렉터리로부터 모델 가중치, feature extractor, 레이블 목록을
     # 불러온다. label_config.json이 있으면 그 안의 레이블 순서를 우선 사용한다
     # (혹시 학습 당시 config.LABELS와 달라졌을 경우를 대비).
-    model = AccentClassifier(MODEL_NAME)
+    # load_from_dir 는 model_config.json 을 읽어 학습 때와 동일한 백본·헤드·
+    # 레이어가중 구조로 골격을 만든다(구버전 체크포인트는 레거시 기본값으로 폴백).
+    model = load_from_dir(model_dir)
     safepath = model_dir / "model.safetensors"
     binpath = model_dir / "pytorch_model.bin"
     if safepath.exists():
@@ -49,7 +51,7 @@ def load_trained(model_dir: Path) -> tuple[AccentClassifier, Wav2Vec2FeatureExtr
     model.load_state_dict(state)
     model.eval()
 
-    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_dir)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(model_dir)
     labels = LABELS
     cfg = model_dir / "label_config.json"
     if cfg.exists():
@@ -71,7 +73,9 @@ def predict(model, feature_extractor, audio_path: Path, want_frames: bool = Fals
     # softmax로 로짓을 확률 분포로 변환. 배치 크기가 1이므로 [0]으로 꺼냄.
     probs = torch.softmax(out.logits, dim=-1)[0].cpu().numpy()
     frame_probs = None
-    if want_frames:
+    # attentive 풀링 헤드는 프레임 로짓을 제공하지 않는다(발화 로짓이 프레임의
+    # 단순 평균이 아니므로). 그 경우 frame_probs 는 None 으로 둔다.
+    if want_frames and out.frame_logits is not None:
         frame_probs = torch.softmax(out.frame_logits, dim=-1)[0].cpu().numpy()  # [T, C]
     return probs, frame_probs
 
@@ -96,7 +100,9 @@ def main() -> None:
     for i in order:
         print(f"  {labels[i]:10s} {probs[i] * 100:5.1f}%")
 
-    if args.plot is not None:
+    if args.plot is not None and frame_probs is None:
+        print("(no frame-level heatmap: this model uses the attentive pooling head)")
+    elif args.plot is not None:
         import matplotlib
 
         matplotlib.use("Agg")  # GUI 없는 환경(서버 등)에서도 동작하도록 백엔드 고정

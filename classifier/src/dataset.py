@@ -63,10 +63,16 @@ def augment_waveform(wav: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     §5.1), not aggressive distortion — so gain stays mild and additive Gaussian
     noise is injected at a fairly high SNR, half the time. Waveform-level (not
     SpecAugment) so it composes with the Wav2Vec2 feature extractor downstream.
+
+    This is the *legacy* (v3) augmentation, kept unchanged so the v3 recipe is
+    exactly reproducible. For domain-shift robustness use ``domain_augment``
+    (aug_strength > 0), which simulates realistic recording conditions.
     """
     # 학습 분할에만 적용하는 가볍고 값싼 증강: 랜덤 게인 + 가끔 가우시안 노이즈.
     # 채널/녹음 confound(GLOBE 24kHz vs SAA mp3)에 대한 강건성을 노리며, 과하지 않게
     # 게인은 완만히, 노이즈는 비교적 높은 SNR로 절반 확률만 주입한다.
+    # (이건 v3 레거시 증강 — 정확한 재현을 위해 그대로 둔다. 도메인 시프트 강건성은
+    #  아래 domain_augment(aug_strength>0)를 쓴다.)
     wav = wav * np.float32(rng.uniform(0.8, 1.2))          # random gain
     if rng.random() < 0.5:                                  # additive noise (half the time)
         rms = float(np.sqrt(np.mean(wav ** 2) + 1e-9))
@@ -76,23 +82,133 @@ def augment_waveform(wav: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     return wav.astype(np.float32)
 
 
+# --- domain-randomization augmentation (v4: GLOBE -> VoxForge domain gap) ------
+# 왜: v3의 최대 잔여 과제 = 미지 코퍼스(VoxForge)에서 CA→US 붕괴. 진단(reports/
+# 2026-07-18-channel-leakage-probe.md)이 원인을 "채널 누수가 아닌 진짜 억양 유사성 +
+# 도메인 시프트"로 판정했다. 학습 데이터(GLOBE)는 깨끗한 24kHz TTS급이고, 평가
+# 타깃(VoxForge)은 아마추어 홈레코딩(대역폭 제한·잔향·실환경 노이즈·발화속도 변동)이다.
+# 이 갭을 학습 시 "도메인 랜덤화"로 흉내내 소스 도메인 과적합을 줄인다(도메인 적응, 대책 C).
+# 레거시(gain+가우시안)와 강한 SpecAugment(피처 마스킹)와는 완전히 다른 축 — 파형 레벨의
+# 현실적 녹음조건 왜곡이다. 전부 numpy만 사용(CPU 값쌈, feature extractor 앞단에 합성).
+
+
+def _windowed_sinc_lowpass(cutoff_hz: float, sr: int, num_taps: int = 63) -> np.ndarray:
+    """Design a simple windowed-sinc FIR low-pass kernel (Hamming window)."""
+    # 대역폭 제한(아마추어 마이크/전화망)을 흉내내기 위한 간단한 윈도우드-싱크 FIR
+    # 저역통과 커널. scipy 없이 numpy만으로 설계한다.
+    fc = np.clip(cutoff_hz / sr, 1e-3, 0.5 - 1e-3)  # normalized cutoff (cycles/sample)
+    n = np.arange(num_taps) - (num_taps - 1) / 2.0
+    h = 2 * fc * np.sinc(2 * fc * n)                # ideal sinc
+    h *= np.hamming(num_taps)                       # window to tame ringing
+    h /= h.sum()                                    # unit DC gain
+    return h.astype(np.float32)
+
+
+def _synthetic_reverb_ir(rng: np.random.Generator, sr: int, strength: float) -> np.ndarray:
+    """Short exponentially-decaying synthetic room impulse response."""
+    # 짧은 지수감쇠 합성 룸 임펄스 응답(RIR) — 방 잔향을 흉내낸다. 실제 RIR 라이브러리
+    # 없이도 "직접음 + 감쇠 반향 꼬리"로 도메인 신호를 준다.
+    rt60 = rng.uniform(0.10, 0.10 + 0.35 * strength)         # 감쇠 시간(초)
+    length = max(8, int(sr * rt60))
+    t = np.arange(length)
+    decay = np.exp(-6.9 * t / length)                        # -60 dB at the tail
+    # 반향 꼬리는 직접음보다 조용하게(≈-10 dB). 에너지 정규화를 하지 않으므로 ir[0]=1
+    # 이 유지되어 conv 결과가 "원음 + 감쇠 반향"이 된다(원음 보존, wet/dry 혼합이 세기 제어).
+    ir = (rng.standard_normal(length) * decay * 0.3).astype(np.float32)
+    ir[0] = 1.0                                              # direct path (dominant)
+    return ir
+
+
+def domain_augment(wav: np.ndarray, rng: np.random.Generator,
+                   strength: float = 1.0) -> np.ndarray:
+    """Realistic recording-condition randomization to close the GLOBE->VoxForge gap.
+
+    Each perturbation fires with its own probability (scaled by ``strength`` in
+    [0, 1+]) and randomizes toward the amateur-home-recording domain the model
+    generalizes poorly to. All waveform-level and numpy-only so it composes with
+    the Wav2Vec2 feature extractor and stays cheap on the dataloader CPU workers.
+    Order mirrors a real capture chain: speed -> band-limit -> reverb -> gain ->
+    noise. Returns a finite float32 waveform (peak-limited to avoid clipping).
+
+    strength=0 is a no-op (caller should use the legacy path instead); 1.0 is the
+    default full-strength preset validated in the aug-strength sweep.
+    """
+    # 현실적 녹음조건 랜덤화로 GLOBE→VoxForge 도메인 갭을 좁힌다. 각 왜곡은 자체
+    # 확률(strength로 스케일)로 발동하며, 실제 캡처 체인 순서(속도→대역제한→잔향→
+    # 게인→노이즈)를 따른다. 전부 파형 레벨·numpy 전용이라 값싸고 feature extractor
+    # 앞단에 자연히 합성된다. strength=0이면 아무것도 안 함(호출측이 레거시 경로 사용).
+    if strength <= 0:
+        return wav.astype(np.float32)
+    s = float(strength)
+    x = wav.astype(np.float32)
+
+    # 1) speed perturbation (±속도) — 발화 속도/피치 변동. np.interp 리샘플(값쌈).
+    if rng.random() < 0.5 * min(s, 1.0):
+        rate = float(rng.uniform(1.0 - 0.10 * s, 1.0 + 0.10 * s))
+        if abs(rate - 1.0) > 1e-3 and len(x) > 4:
+            new_len = max(4, int(round(len(x) / rate)))
+            src = np.linspace(0.0, len(x) - 1, num=new_len, dtype=np.float32)
+            x = np.interp(src, np.arange(len(x), dtype=np.float32), x).astype(np.float32)
+
+    # 2) band-limiting low-pass — 제한된 대역폭 마이크/전화망. 랜덤 컷오프 FIR.
+    if rng.random() < 0.5 * min(s, 1.0):
+        cutoff = float(rng.uniform(3200.0, 7200.0))
+        h = _windowed_sinc_lowpass(cutoff, SAMPLE_RATE)
+        x = np.convolve(x, h, mode="same").astype(np.float32)
+
+    # 3) reverb — 방 잔향. 짧은 합성 RIR과 컨볼브 후 wet/dry 혼합.
+    if rng.random() < 0.35 * min(s, 1.0):
+        ir = _synthetic_reverb_ir(rng, SAMPLE_RATE, s)
+        wet = np.convolve(x, ir, mode="full")[: len(x)].astype(np.float32)
+        mix = float(rng.uniform(0.15, 0.15 + 0.45 * s))
+        x = ((1.0 - mix) * x + mix * wet).astype(np.float32)
+
+    # 4) random gain — 마이크 거리/입력 게인 변동(레거시보다 넓게).
+    x = x * np.float32(rng.uniform(1.0 - 0.4 * s, 1.0 + 0.4 * s))
+
+    # 5) additive noise — 실환경 배경음. 절반 확률로, 넓고 낮은 SNR. 절반은 저역통과
+    #    시켜 '컬러' 노이즈(백색보다 홈레코딩 배경음에 가깝게).
+    if rng.random() < 0.6 * min(s, 1.0):
+        rms = float(np.sqrt(np.mean(x ** 2) + 1e-9))
+        snr_db = float(rng.uniform(30.0 - 22.0 * s, 30.0 - 5.0 * s))
+        noise_rms = rms / (10.0 ** (snr_db / 20.0))
+        noise = rng.normal(0.0, noise_rms, size=x.shape).astype(np.float32)
+        if rng.random() < 0.5:
+            noise = np.convolve(
+                noise, _windowed_sinc_lowpass(rng.uniform(2000.0, 6000.0), SAMPLE_RATE),
+                mode="same").astype(np.float32)
+        x = x + noise
+
+    # peak-limit so downstream normalization sees a sane range (avoid hard clip).
+    # 게인/노이즈 후 피크가 튀면 다운스트림 정규화가 왜곡되므로 부드럽게 리미팅.
+    peak = float(np.max(np.abs(x)) + 1e-9)
+    if peak > 1.0:
+        x = x / peak
+    return np.nan_to_num(x, copy=False).astype(np.float32)
+
+
 class AccentDataset(Dataset):
     def __init__(
         self,
         manifest: "str | Path | pd.DataFrame",
         curated_root: Path = CURATED_ROOT,
         augment: bool = False,
+        aug_strength: float = 0.0,
     ):
         # manifest: filename,label,country[,speaker,source] 컬럼을 가진 CSV 경로이거나
         # 이미 로드된 DataFrame (prepare_data.build_splits 가 만든 train/val/test).
         # 오디오는 <curated_root>/<country>/audio/<filename> 에서 로드한다.
         # augment: True 면 파형 증강을 적용한다(학습 분할에만 켤 것).
+        # aug_strength: 0 이면 레거시(v3) 경량 증강(gain+가우시안), >0 이면 도메인
+        #   랜덤화(domain_augment) — 값이 클수록 GLOBE→VoxForge 도메인 갭을 강하게
+        #   흉내낸다(대책 C). augment=False 면 무시된다.
         if isinstance(manifest, pd.DataFrame):
             self.df = manifest.reset_index(drop=True)
         else:
             self.df = pd.read_csv(manifest)
         self.curated_root = Path(curated_root)
         self.augment = augment
+        self.aug_strength = float(aug_strength)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -101,13 +217,27 @@ class AccentDataset(Dataset):
         row = self.df.iloc[idx]
         path = self.curated_root / row["country"] / "audio" / row["filename"]
         wav = load_audio(path)
+        # default_rng() (seed 없음)는 OS 엔트로피로 초기화되어 DataLoader
+        # 워커/호출마다 독립적이다 — 증강은 재현성이 필요없다.
+        rng = np.random.default_rng() if self.augment else None
         if len(wav) > MAX_SAMPLES:
-            wav = wav[:MAX_SAMPLES]  # crop long clips
-            # 너무 긴 클립은 앞부분 MAX_SAMPLES(기본 8초)만 잘라서 사용한다.
+            if self.augment:
+                # 학습 시엔 무작위 위치의 MAX_SAMPLES 윈도를 잘라 쓴다(공짜 증강 +
+                # 긴 클립/SAA 문단의 앞부분에만 치우치지 않게 커버리지 확대).
+                start = int(rng.integers(0, len(wav) - MAX_SAMPLES + 1))
+                wav = wav[start:start + MAX_SAMPLES]
+            else:
+                # 평가 시엔 결정적으로 앞부분 MAX_SAMPLES(기본 8초)만 사용한다.
+                wav = wav[:MAX_SAMPLES]
         if self.augment:
-            # default_rng() (seed 없음)는 OS 엔트로피로 초기화되어 DataLoader
-            # 워커/호출마다 독립적이다 — 증강은 재현성이 필요없다.
-            wav = augment_waveform(wav, np.random.default_rng())
+            if self.aug_strength > 0:
+                # 도메인 랜덤화(대책 C). 속도 왜곡으로 길이가 늘 수 있으니 학습 윈도우
+                # 상한(MAX_SAMPLES)으로 다시 잘라 배치 패딩 낭비를 막는다.
+                wav = domain_augment(wav, rng, self.aug_strength)
+                if len(wav) > MAX_SAMPLES:
+                    wav = wav[:MAX_SAMPLES]
+            else:
+                wav = augment_waveform(wav, rng)          # 레거시(v3) 경량 증강
         return {"waveform": wav, "label": int(row["label"])}
 
 
