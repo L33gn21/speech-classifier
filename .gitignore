@@ -18,6 +18,9 @@ env/
 # Markdown docs (README/CLAUDE/DATASET/docs/reports/...): kept locally only,
 # not tracked in git history.
 *.md
+# Exceptions: root-level README/PRD are tracked for the GitHub project page.
+!/README.md
+!/PRD.md
 
 # Python cache
 __pycache__/
