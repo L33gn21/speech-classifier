@@ -61,9 +61,8 @@ from config import (
     MODEL_NAME,
     NUM_FAKE_LABELS,
     OUTPUT_DIR,
+    REAL_FAKE_ROOT,
     SEED,
-    SPOOF_ROOT,
-    TARGET_PER_CLASS,
     TEST_FRACTION,
     VAL_FRACTION,
 )
@@ -318,13 +317,14 @@ def run_multitask(args) -> None:
     tb_log_dir = os.environ.get(
         "AIP_TENSORBOARD_LOG_DIR", os.path.join(args.output_dir, "tb_logs"))
 
+    # real_fake_5k 는 이미 균형 잡힌(real:fake=35000:35000) 평탄 풀이고(DATASET.md
+    # §11), 화자 단위 70:15:15 split 컬럼도 gcloud/pad_and_split_v2.py 가 미리
+    # 계산해 매니페스트에 기록해 두었다 — per_class/spoof_cap 언더샘플링도, 분할
+    # 재계산도 필요 없다. 여기선 그 split 컬럼을 그대로 읽기만 한다.
     train_df, val_df, test_df = build_multitask_splits(
-        curated_root=args.curated_root,
-        spoof_root=args.spoof_root,
-        per_class=args.per_class,
+        real_fake_root=args.real_fake_root,
         val_fraction=args.val_fraction,
         test_fraction=args.test_fraction,
-        spoof_cap=args.spoof_cap,
         seed=SEED,
     )
     report_mt("train", train_df)
@@ -338,13 +338,10 @@ def run_multitask(args) -> None:
     feature_extractor = AutoFeatureExtractor.from_pretrained(args.backbone)
     collator = MultiTaskCollator(feature_extractor)
 
-    train_ds = MultiTaskDataset(train_df, curated_root=args.curated_root,
-                                spoof_root=args.spoof_root,
-                                augment=args.augment, aug_strength=args.aug_strength)
-    eval_ds = MultiTaskDataset(val_df, curated_root=args.curated_root,
-                               spoof_root=args.spoof_root)
-    test_ds = MultiTaskDataset(test_df, curated_root=args.curated_root,
-                               spoof_root=args.spoof_root)
+    train_ds = MultiTaskDataset(train_df, augment=args.augment,
+                                aug_strength=args.aug_strength)
+    eval_ds = MultiTaskDataset(val_df)
+    test_ds = MultiTaskDataset(test_df)
     aug_kind = ("domain" if args.augment and args.aug_strength > 0
                 else "legacy" if args.augment else "off")
     print(f"[multitask] train={len(train_ds)} val={len(eval_ds)} test={len(test_ds)} "
@@ -429,7 +426,8 @@ def run_multitask(args) -> None:
     val_metrics = trainer.predict(eval_ds, metric_key_prefix="eval").metrics
     print("final val eval:", json.dumps(val_metrics, indent=2))
     test_metrics = trainer.predict(test_ds, metric_key_prefix="test").metrics
-    print("final test eval (held-out; spoof=ASVspoof eval unseen attacks):",
+    print("final test eval (held-out, speaker-disjoint; does NOT preserve "
+          "ASVspoof's unseen-attack protocol boundary, see DATASET.md §11):",
           json.dumps(test_metrics, indent=2))
     metrics = {**val_metrics, **test_metrics}
     metrics["train_config"] = {
@@ -440,8 +438,7 @@ def run_multitask(args) -> None:
         "backbone": args.backbone,
         "head": args.head,
         "unfreeze_top": args.unfreeze_top,
-        "per_class": args.per_class,
-        "spoof_cap": args.spoof_cap,
+        "real_fake_root": args.real_fake_root,
         "fake_loss_weight": args.fake_loss_weight,
         "epochs": args.epochs,
     }
@@ -481,7 +478,9 @@ def main() -> None:
     # 메모리 절약을 위한 그래디언트 체크포인팅 활성화 옵션(속도 대신 메모리 절약).
     ap.add_argument("--output-dir", default=str(OUTPUT_DIR))
     ap.add_argument("--curated-root", default=str(CURATED_ROOT))
-    ap.add_argument("--per-class", type=int, default=TARGET_PER_CLASS)
+    ap.add_argument("--per-class", type=int, default=None,
+                    help="optional speaker-aware cap for quick experiments; "
+                         "omit to use the full fixed 5000/class pool (DATASET.md §11)")
     # --- multi-task (country + real/fake) knobs -------------------------------
     ap.add_argument("--multitask", action="store_true",
                     help="joint country + real/fake head training (adds ASVspoof "
@@ -493,12 +492,10 @@ def main() -> None:
                     type=float, default=1.0,
                     help="λ multiplier on the real/fake loss (multitask only)")
     # 결합 손실에서 real/fake 손실 항의 가중치 λ (멀티태스크 전용).
-    ap.add_argument("--spoof-cap", "--spoof_cap", dest="spoof_cap", type=int, default=None,
-                    help="cap spoof clips per split (bonafide kept in full); "
-                         "None=all (multitask only)")
-    # 스플릿별 spoof 클립 상한(bonafide 는 전량 유지). None 이면 전량(멀티태스크 전용).
-    ap.add_argument("--spoof-root", default=str(SPOOF_ROOT),
-                    help="root of the curated_spoof/<split>/ corpus (multitask only)")
+    ap.add_argument("--real-fake-root", "--real_fake_root", dest="real_fake_root",
+                    default=str(REAL_FAKE_ROOT),
+                    help="root of the pre-balanced curated_spoof/real_fake_5k/ "
+                         "pool (multitask only, DATASET.md §11)")
     ap.add_argument("--val-fraction", type=float, default=VAL_FRACTION)
     ap.add_argument("--test-fraction", type=float, default=TEST_FRACTION)
     ap.add_argument("--no-fp16", action="store_true")

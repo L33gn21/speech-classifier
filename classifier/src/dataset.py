@@ -28,12 +28,11 @@ import torch
 from torch.utils.data import Dataset
 
 from config import (
-    COUNTRY_IGNORE_INDEX,
     CURATED_ROOT,
     MANIFEST_DIR,
     MAX_SAMPLES,
     SAMPLE_RATE,
-    SPOOF_ROOT,
+    gcs_to_fuse,
 )
 
 
@@ -280,26 +279,29 @@ def _crop_and_augment(wav: np.ndarray, augment: bool, aug_strength: float) -> np
 class MultiTaskDataset(Dataset):
     """Dataset for joint country + real/fake training over a unified manifest.
 
-    The unified manifest (built by prepare_data_multitask.build_multitask_splits)
-    has columns: ``filename, dataset, subdir, country_label, fake_label, speaker,
-    source``. Audio resolves as ``<root(dataset)>/<subdir>/audio/<filename>`` where
-    ``dataset`` is ``accent`` (-> curated_root, the GLOBE/SAA country pool) or
-    ``spoof`` (-> spoof_root, curated_spoof/asvspoof2019_la/<split>).
+    The unified manifest (built by prepare_data_multitask.build_multitask_splits,
+    DATASET.md §11) has columns: ``filename, audio_uri, country, country_label,
+    fake_label, speaker, source, system_id, orig_split``. ``audio_uri`` is
+    already a full ``gs://`` (or local) path — real country-sourced rows point
+    at ``curated/<CC>/audio/``, ASVspoof-derived/oversample-dup rows point at
+    ``curated_spoof/real_fake_5k/audio_asv|audio_dup/`` — so each row resolves
+    its own audio independently; no shared root is needed.
 
-    ``country_label`` is the 0..5 country id for accent clips, or
-    ``COUNTRY_IGNORE_INDEX`` (-100) for spoof clips (no country label -> ignored by
-    the country loss). ``fake_label`` is 0=real / 1=fake for every clip.
+    ``country_label`` is the 0..5 country id for country-sourced clips, or
+    ``COUNTRY_IGNORE_INDEX`` (-100) for ASVspoof-sourced clips (no country
+    label -> ignored by the country loss). ``fake_label`` is 0=real / 1=fake
+    for every clip.
     """
-    # 국가 + real/fake 를 함께 학습하기 위한 통합 데이터셋. 통합 매니페스트 컬럼:
-    # filename,dataset,subdir,country_label,fake_label,speaker,source.
-    # 오디오 경로 = <root(dataset)>/<subdir>/audio/<filename> (accent→curated_root,
-    # spoof→spoof_root). country_label 은 accent 는 0..5, spoof 는 -100(국가 손실 무시).
-    # fake_label 은 모든 클립에 대해 0=real / 1=fake.
+    # 국가 + real/fake 를 함께 학습하기 위한 통합 데이터셋(DATASET.md §11). 통합
+    # 매니페스트 컬럼: filename,audio_uri,country,country_label,fake_label,speaker,
+    # source,system_id,orig_split. audio_uri 가 이미 완전한 경로이므로(국가 real은
+    # curated/<CC>/audio/, ASVspoof 유래/중복복사는 real_fake_5k/audio_asv|audio_dup/)
+    # 행마다 자기 경로로 직접 로드한다 — 공유 root 불필요. country_label 은 국가 유래
+    # 클립은 0..5, ASVspoof 유래 클립은 -100(국가 손실 무시). fake_label 은 모든
+    # 클립에 대해 0=real / 1=fake.
     def __init__(
         self,
         manifest: "str | Path | pd.DataFrame",
-        curated_root: Path = CURATED_ROOT,
-        spoof_root: Path = SPOOF_ROOT,
         augment: bool = False,
         aug_strength: float = 0.0,
     ):
@@ -307,7 +309,6 @@ class MultiTaskDataset(Dataset):
             self.df = manifest.reset_index(drop=True)
         else:
             self.df = pd.read_csv(manifest)
-        self.roots = {"accent": Path(curated_root), "spoof": Path(spoof_root)}
         self.augment = augment
         self.aug_strength = float(aug_strength)
 
@@ -316,8 +317,7 @@ class MultiTaskDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         row = self.df.iloc[idx]
-        root = self.roots[row["dataset"]]
-        path = root / str(row["subdir"]) / "audio" / row["filename"]
+        path = Path(gcs_to_fuse(str(row["audio_uri"])))
         wav = load_audio(path)
         wav = _crop_and_augment(wav, self.augment, self.aug_strength)
         return {

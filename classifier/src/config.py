@@ -108,15 +108,24 @@ NUM_LABELS = len(LABELS)
 # Spoof / fake-detection axis (multi-task real/fake head)
 # fake(합성 음성) 탐지 축 — 국가와 별개의 두 번째 라벨 축(멀티태스크 헤드)
 # ---------------------------------------------------------------------------
-# spoof 코퍼스(ASVspoof 2019 LA)는 국가 curated 풀과 분리된 별도 프리픽스에 있다
-# (레이아웃·스키마가 다르므로 국가 로더는 이걸 스캔하지 않는다 — DATASET.md §10).
-# 기본값을 CURATED_ROOT 의 "형제" 경로로 두면, Vertex 에서 CV_CURATED_ROOT 가
-# gs://bucket/curated 로 주입될 때 spoof 도 /gcs/bucket/curated_spoof/... 로 자동
-# 해석된다(추가 env 주입 불필요). CV_SPOOF_ROOT 로 따로 재정의도 가능.
+# Training reads the flat, pre-balanced real/fake pool (DATASET.md §11):
+#   curated_spoof/real_fake_5k/manifest.csv (label,country,source,system_id,
+#   speaker,orig_split,fname,audio_uri) — audio_uri is a full gs:// path (real
+#   country-sourced rows point straight at curated/<CC>/audio/, ASVspoof-derived
+#   and oversample-dup rows point at real_fake_5k/audio_asv|audio_dup/), so the
+#   dataset loader resolves audio directly from audio_uri and never needs a
+#   separate root per row. Default is CURATED_ROOT's "sibling" so Vertex's
+#   CV_CURATED_ROOT injection auto-resolves this too; override with
+#   CV_REAL_FAKE_ROOT.
+REAL_FAKE_ROOT = _env_path(
+    "CV_REAL_FAKE_ROOT", CURATED_ROOT.parent / "curated_spoof" / "real_fake_5k"
+)
+# Legacy raw ASVspoof 2019 LA corpus (bonafide/spoof per protocol split). Kept
+# only as the read-only source real_fake_5k was built from — training no
+# longer reads this directly (DATASET.md §10/§11).
 SPOOF_ROOT = _env_path(
     "CV_SPOOF_ROOT", CURATED_ROOT.parent / "curated_spoof" / "asvspoof2019_la"
 )
-# ASVspoof 프로토콜 스플릿 — 반드시 보존(eval 은 train/dev 에 없는 미지 공격 A07–A19).
 SPOOF_SPLITS: list[str] = ["train", "dev", "eval"]
 
 # real/fake 헤드 레이블(이진). 순서 고정: real=0, fake=1 (학습된 fake 헤드가 의존).

@@ -17,7 +17,12 @@ Config is read from env vars so the same module works both as a local script
     DASHBOARD_USER    login user (shared with the dataset dashboard)
     DASHBOARD_PASS    login password
     DATASET_DASHBOARD_URL  optional link back to the dataset dashboard
+    API_KEY           static key other servers send via X-API-Key to hit /api/*
     PORT              listen port (Cloud Run injects this; default 8766)
+
+/api/* is a separate, machine-facing surface (X-API-Key header auth instead of
+the browser session login) — see api_key_required and the /api/models,
+/api/metrics/<job>, /api/predict routes near the bottom of this file.
 
 Usage:
     python serve_model_tester.py
@@ -58,6 +63,10 @@ app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
 # 단일 사용자 로그인 정보. 데이터셋 대시보드와 동일한 기본값을 공유한다.
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "geonah")
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS", "dmdlsldk2!")
+
+# 다른 서버가 /api/* 를 호출할 때 쓰는 정적 API 키. 데모용 — 회전/스코프 없이
+# 헤더 값만 비교한다. 배포 시 deploy.sh 가 env var로 주입한다.
+API_KEY = os.environ.get("API_KEY", "dev-key-change-me")
 
 # 학습 job들이 쌓이는 GCS 접두어. 각 job은 <MODEL_ROOT>/<JOB_NAME>/model/ 아래에
 # model.safetensors / label_config.json / preprocessor_config.json / final_metrics.json 을 갖는다.
@@ -342,6 +351,48 @@ def login_required(view):
     return wrapped
 
 
+def api_key_required(view):
+    # 세션 로그인이 아니라 X-API-Key 헤더로 인증하는 머신용 라우트에 붙인다.
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        key = request.headers.get("X-API-Key", "")
+        if key != API_KEY:
+            return jsonify(ok=False, error="invalid or missing X-API-Key header"), 401
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+# /api/* 를 브라우저에서 직접 호출하는 외부 서비스(해커톤 프론트엔드)를 위한 CORS.
+# 세션 로그인 라우트는 same-origin만 쓰므로 대상 밖 — /api/* 에만 헤더를 붙인다.
+CORS_ALLOWED_ORIGINS = {
+    o.strip()
+    for o in os.environ.get(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:8000,https://jinwoong-team-hackertone2026-4nsi.onrender.com",
+    ).split(",")
+    if o.strip()
+}
+
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if request.path.startswith("/api/") and origin in CORS_ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Headers"] = "X-API-Key, Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+
+@app.route("/api/<path:_path>", methods=["OPTIONS"])
+def api_cors_preflight(_path):
+    # 프리플라이트는 API 키 없이 온다 — 인증 없이 204만 돌려주고 위 after_request가
+    # 헤더를 붙인다.
+    return "", 204
+
+
 LOGIN_PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Login — Model tester</title>
 <style>
@@ -538,7 +589,7 @@ function renderMetrics(data) {{
   let html = '';
 
   if (data.multitask) {{
-    html += '<div class="sec-title">Real/Fake detection (ASVspoof held-out, unseen attacks)</div>';
+    html += '<div class="sec-title">Real/Fake detection (held-out, speaker-disjoint)</div>';
     html += '<div class="cards">';
     html += statCard('Fake acc', PCT(t.fake_accuracy));
     html += statCard('Fake macro F1', PCT(t.fake_macro_f1));
@@ -767,6 +818,51 @@ def predict():
         return jsonify(ok=True, **result)
     except Exception as exc:
         return jsonify(ok=False, error=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Machine API  —  다른 서버가 X-API-Key 헤더로 호출하는 JSON 전용 엔드포인트.
+# 브라우저 세션 로그인과 무관 — 위 /models, /metrics, /predict 와 로직은 같고
+# 인증 방식만 다르다 (서버 간 호출은 폼 로그인을 할 수 없으므로 분리).
+# ---------------------------------------------------------------------------
+@app.get("/api/models")
+@api_key_required
+def api_models():
+    try:
+        return jsonify(ok=True, models=list_models())
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc))
+
+
+@app.get("/api/metrics/<path:job>")
+@api_key_required
+def api_metrics(job: str):
+    try:
+        return jsonify(ok=True, **get_metrics(job))
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc))
+
+
+@app.post("/api/predict")
+@api_key_required
+def api_predict():
+    # model 생략 시 가장 최신(list_models()가 최신순으로 반환) job을 쓴다 —
+    # 호출 서버가 job 이름을 몰라도 되게.
+    job = request.form.get("model")
+    if not job:
+        models = list_models()
+        if not models:
+            return jsonify(ok=False, error="no trained models found under MODEL_ROOT"), 503
+        job = models[0]["job"]
+    f = request.files.get("audio")
+    if f is None:
+        return jsonify(ok=False, error="no audio uploaded (multipart field 'audio')"), 400
+    try:
+        raw = f.read()
+        result = run_inference(job, raw)
+        return jsonify(ok=True, model=job, **result)
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc)), 500
 
 
 def main() -> None:

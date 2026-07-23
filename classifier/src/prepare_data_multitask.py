@@ -1,154 +1,141 @@
 """Phase 1 (multi-task) — build unified country + real/fake split manifests.
 
-Combines the validated country splits (``prepare_data.build_splits`` over the
-GLOBE/SAA curated pool) with the ASVspoof 2019 LA spoof corpus (``curated_spoof``)
-into one train/val/test manifest for joint training of the country head + the
-real/fake head.
+Reads the flat, pre-balanced real/fake pool built by the v2 dataset rebuild
+(``classifier/gcloud/rebuild_dataset_v2_vm.py``, DATASET.md §11):
+
+    curated_spoof/real_fake_5k/manifest.csv
+    columns: label(real/fake), country(US/UK/CA/AU/IN/CN/NA), source
+             (GLOBE/SAA/ASVspoof), system_id(A01-A19 or "-"), speaker,
+             orig_split(ASVspoof protocol split or "-"), fname, audio_uri
+
+``audio_uri`` is already a full ``gs://`` path — real country-sourced rows
+point straight at ``curated/<CC>/audio/``, ASVspoof-derived and oversample-dup
+rows point at ``curated_spoof/real_fake_5k/audio_asv|audio_dup/`` — so this
+module (and ``dataset.MultiTaskDataset``) never needs a separate root per row.
+
+The pool is already balanced (real:fake = 35000:35000, §11) AND already has a
+precomputed, speaker-disjoint ``split`` column (train/val/test, ~70:15:15 --
+written by ``gcloud/pad_and_split_v2.py``: 6 country-real buckets split
+independently, plus ONE joint split decision per ASVspoof speaker id shared
+across bonafide/spoof so real-NA and fake-NA stay disjoint together, not just
+each independently balanced). This module just reads that column.
 
 Unified manifest columns:
-    filename, dataset, subdir, country_label, fake_label, speaker, source
+    filename, audio_uri, country, country_label, fake_label, speaker,
+    source, system_id, orig_split
 
-Label assignment per clip:
-  - accent (GLOBE/SAA): dataset=accent, subdir=<CC>,    country_label=0..5, fake_label=0 (real)
-  - ASVspoof bonafide : dataset=spoof,  subdir=<split>, country_label=-100, fake_label=0 (real)
-  - ASVspoof spoof    : dataset=spoof,  subdir=<split>, country_label=-100, fake_label=1 (fake)
+Label assignment per row:
+  - country real (GLOBE/SAA): country_label=0..5, fake_label=0 (real)
+  - ASVspoof bonafide/spoof (country="NA"): country_label=-100 (ignored by
+    the country loss), fake_label=0 (real) / 1 (fake)
 
-Split mapping preserves the ASVspoof protocol (eval = unseen attacks A07-A19):
-    accent train + asvspoof train -> train
-    accent val   + asvspoof dev   -> val
-    accent test  + asvspoof eval  -> test   (held-out; eval attacks unseen in train)
-
-The spoof corpus keeps ALL bonafide (the channel-matched real anchor) and caps
-only the much larger spoof set per split via ``spoof_cap``. Random clip sampling
-within a split is leakage-safe (ASVspoof splits are already speaker-disjoint by
-protocol) and preserves attack-system coverage.
+NOTE: the precomputed split does NOT preserve ASVspoof's unseen-attack
+(A07-A19 in eval) protocol boundary — whether that boundary should be
+respected instead is an open decision (DATASET.md §11 "Deferred").
+``system_id``/``orig_split`` are kept in the output so a future re-split can
+still make that call without re-touching the bucket.
 """
 # 1단계(멀티태스크) — 국가 + real/fake 통합 스플릿 매니페스트 생성.
-# 검증된 국가 스플릿(prepare_data.build_splits, GLOBE/SAA)에 ASVspoof 2019 LA spoof
-# 코퍼스(curated_spoof)를 합쳐 국가 헤드 + real/fake 헤드를 함께 학습할 train/val/test
-# 를 만든다. ASVspoof 프로토콜 스플릿(eval=미지 공격)을 보존한다.
+# v2 데이터셋 재구축(rebuild_dataset_v2_vm.py, DATASET.md §11)이 만든 평탄한
+# real/fake 풀(curated_spoof/real_fake_5k/manifest.csv)을 읽는다. 이 풀은
+# 이미 real:fake=35000:35000 로 균형이 맞춰져 있고, 화자 단위로 미리 계산된
+# split 컬럼(train/val/test, 약 70:15:15 — gcloud/pad_and_split_v2.py)도 이미
+# 갖고 있다. 여기서 분할을 다시 계산하지 않고 그 컬럼을 그대로 읽는다.
+# audio_uri 가 이미 완전한 gs:// 경로이므로 root+subdir 조합이 필요 없다.
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from config import (
     COUNTRY_IGNORE_INDEX,
-    CURATED_ROOT,
     FAKE2ID,
+    LABEL2ID,
+    REAL_FAKE_ROOT,
     SEED,
-    SPOOF_ROOT,
-    TARGET_PER_CLASS,
     TEST_FRACTION,
     VAL_FRACTION,
 )
-from prepare_data import build_splits
 
-UNIFIED_COLS = ["filename", "dataset", "subdir", "country_label",
-                "fake_label", "speaker", "source"]
-
-# our split name -> ASVspoof protocol split folder under curated_spoof/
-# 우리 스플릿 이름 -> curated_spoof 아래 ASVspoof 프로토콜 스플릿 폴더명.
-_SPOOF_SPLIT_FOR = {"train": "train", "val": "dev", "test": "eval"}
+UNIFIED_COLS = ["filename", "audio_uri", "country", "country_label", "fake_label",
+                "speaker", "source", "system_id", "orig_split", "split"]
 
 
-def _accent_to_unified(df: pd.DataFrame) -> pd.DataFrame:
-    """Map a country split frame (filename,label,country,speaker,source) -> unified."""
-    # 국가 스플릿 프레임을 통합 스키마로 변환한다(전부 real, 국가 라벨 0..5).
+def load_real_fake_pool(real_fake_root: Path) -> pd.DataFrame:
+    """Read curated_spoof/real_fake_5k/manifest.csv (raw source schema)."""
+    mpath = Path(real_fake_root) / "manifest.csv"
+    df = pd.read_csv(mpath, dtype=str, keep_default_na=False)
+    if "split" not in df.columns:
+        raise ValueError(
+            f"{mpath} has no 'split' column — run gcloud/pad_and_split_v2.py "
+            "first (DATASET.md §11)")
+    return df
+
+
+def _to_unified(df: pd.DataFrame) -> pd.DataFrame:
+    """Map the raw real_fake_5k manifest -> the unified training schema."""
+    # country="NA" (ASVspoof-sourced rows) -> no country label (ignored by the
+    # country loss); the 6 country codes map to their usual 0..5 ids.
+    country_label = df["country"].map(lambda c: LABEL2ID.get(c, COUNTRY_IGNORE_INDEX))
+    fake_label = df["label"].map(FAKE2ID)
     return pd.DataFrame({
-        "filename": df["filename"].to_numpy(),
-        "dataset": "accent",
-        "subdir": df["country"].to_numpy(),
-        "country_label": df["label"].astype(int).to_numpy(),
-        "fake_label": FAKE2ID["real"],
+        "filename": df["fname"].to_numpy(),
+        "audio_uri": df["audio_uri"].to_numpy(),
+        "country": df["country"].to_numpy(),
+        "country_label": country_label.astype(int).to_numpy(),
+        "fake_label": fake_label.astype(int).to_numpy(),
         "speaker": df["speaker"].to_numpy(),
-        "source": df["source"].to_numpy() if "source" in df else "",
-    })
-
-
-def _load_spoof_split(spoof_root: Path, split: str, spoof_cap: int | None,
-                      rng: np.random.Generator) -> pd.DataFrame:
-    """Read curated_spoof/<split>/manifest.csv -> unified (bonafide=real, spoof=fake).
-
-    Keeps ALL bonafide (channel-matched real anchor); caps only spoof to
-    ``spoof_cap`` via random within-split sampling (leakage-safe, see module doc).
-    """
-    # curated_spoof/<split>/manifest.csv (컬럼: fname,source,speaker,key,system_id,split)
-    # 를 읽어 통합 스키마로. key: bonafide->real(0), spoof->fake(1). bonafide 는 전량
-    # 유지(채널 매칭 real 앵커), spoof 만 spoof_cap 으로 랜덤 언더샘플(스플릿 내 화자
-    # disjoint 이므로 클립 랜덤 샘플은 누수 없음, 공격 시스템 커버리지 보존).
-    mpath = Path(spoof_root) / split / "manifest.csv"
-    m = pd.read_csv(mpath, dtype=str, keep_default_na=False)
-    is_bona = m["key"].str.lower() == "bonafide"
-    m = m.assign(_fake=np.where(is_bona, FAKE2ID["real"], FAKE2ID["fake"]))
-    bona = m[m["_fake"] == FAKE2ID["real"]]
-    spoof = m[m["_fake"] == FAKE2ID["fake"]]
-    if spoof_cap is not None and len(spoof) > spoof_cap:
-        idx = rng.choice(spoof.index.to_numpy(), size=int(spoof_cap), replace=False)
-        spoof = spoof.loc[idx]
-    keep = pd.concat([bona, spoof])
-    return pd.DataFrame({
-        "filename": keep["fname"].to_numpy(),
-        "dataset": "spoof",
-        "subdir": split,
-        "country_label": COUNTRY_IGNORE_INDEX,
-        "fake_label": keep["_fake"].astype(int).to_numpy(),
-        "speaker": keep["speaker"].to_numpy(),
-        "source": (keep["source"].to_numpy() if "source" in keep else "ASVspoof2019LA"),
+        "source": df["source"].to_numpy(),
+        "system_id": df["system_id"].to_numpy() if "system_id" in df else "-",
+        "orig_split": df["orig_split"].to_numpy() if "orig_split" in df else "-",
+        "split": df["split"].to_numpy(),
     })
 
 
 def build_multitask_splits(
-    curated_root: Path = CURATED_ROOT,
-    spoof_root: Path = SPOOF_ROOT,
-    per_class: int = TARGET_PER_CLASS,
+    real_fake_root: Path = REAL_FAKE_ROOT,
     val_fraction: float = VAL_FRACTION,
     test_fraction: float = TEST_FRACTION,
-    spoof_cap: int | None = None,
     seed: int = SEED,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Country splits (validated recipe) + ASVspoof protocol splits -> unified 3-way."""
-    # 국가 스플릿(검증 레시피) + ASVspoof 프로토콜 스플릿을 통합해 3분할 반환.
-    rng = np.random.default_rng(seed)
-    a_train, a_val, a_test = build_splits(
-        curated_root, per_class, val_fraction, test_fraction, seed)
-    out = {}
-    for name, adf in [("train", a_train), ("val", a_val), ("test", a_test)]:
-        acc = _accent_to_unified(adf)
-        spf = _load_spoof_split(spoof_root, _SPOOF_SPLIT_FOR[name], spoof_cap, rng)
-        out[name] = pd.concat([acc, spf])[UNIFIED_COLS].reset_index(drop=True)
-    return out["train"], out["val"], out["test"]
+    """Load the pre-balanced real/fake pool, split by its precomputed ``split``
+    column. ``val_fraction``/``test_fraction``/``seed`` are accepted for call-site
+    compatibility but unused -- the split is already fixed in the manifest."""
+    raw = load_real_fake_pool(real_fake_root)
+    df = _to_unified(raw)
+    train = df[df["split"] == "train"].reset_index(drop=True)
+    val = df[df["split"] == "val"].reset_index(drop=True)
+    test = df[df["split"] == "test"].reset_index(drop=True)
+
+    tr, va, te = set(train["speaker"]), set(val["speaker"]), set(test["speaker"])
+    assert not (tr & va), f"speaker leakage train/val: {len(tr & va)}"
+    assert not (tr & te), f"speaker leakage train/test: {len(tr & te)}"
+    assert not (va & te), f"speaker leakage val/test: {len(va & te)}"
+    return train[UNIFIED_COLS], val[UNIFIED_COLS], test[UNIFIED_COLS]
 
 
 def report(name: str, df: pd.DataFrame) -> None:
-    """Print the accent/spoof and real/fake composition of a unified split."""
-    # 통합 스플릿의 accent/spoof, real/fake 구성을 출력한다(진단용).
-    acc = int((df["dataset"] == "accent").sum())
-    spf = int((df["dataset"] == "spoof").sum())
+    """Print the country and real/fake composition of a unified split."""
     real = int((df["fake_label"] == FAKE2ID["real"]).sum())
     fake = int((df["fake_label"] == FAKE2ID["fake"]).sum())
-    print(f"[{name}] {len(df)} clips  accent={acc} spoof={spf}  real={real} fake={fake}")
+    has_country = int((df["country_label"] != COUNTRY_IGNORE_INDEX).sum())
+    print(f"[{name}] {len(df)} clips  country-labeled={has_country}  "
+          f"real={real} fake={fake}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--per-class", type=int, default=TARGET_PER_CLASS)
-    ap.add_argument("--spoof-cap", "--spoof_cap", dest="spoof_cap", type=int, default=None,
-                    help="cap spoof clips per split (bonafide always kept in full)")
     ap.add_argument("--val-fraction", type=float, default=VAL_FRACTION)
     ap.add_argument("--test-fraction", type=float, default=TEST_FRACTION)
     ap.add_argument("--seed", type=int, default=SEED)
-    ap.add_argument("--curated-root", default=str(CURATED_ROOT))
-    ap.add_argument("--spoof-root", default=str(SPOOF_ROOT))
+    ap.add_argument("--real-fake-root", default=str(REAL_FAKE_ROOT))
     ap.add_argument("--manifest-dir", default=None)
     args = ap.parse_args()
 
     train, val, test = build_multitask_splits(
-        args.curated_root, args.spoof_root, args.per_class,
-        args.val_fraction, args.test_fraction, args.spoof_cap, args.seed)
+        args.real_fake_root, args.val_fraction, args.test_fraction, args.seed)
     for nm, part in [("train", train), ("val", val), ("test", test)]:
         report(nm, part)
 

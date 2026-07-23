@@ -87,6 +87,10 @@ plt.rcParams.update({
 
 DEFAULT_ROOT = "gs://qi-ucsd-speech-us/curated"
 DEFAULT_CLASSES = ["US", "UK", "IN", "NG", "CA", "JP", "CN", "AU", "KR"]
+# fake(합성음성) 탐지용 spoof 코퍼스 — 국가 curated/와 다른 프리픽스/스키마
+# (fname,source,speaker,key,system_id,split). DATASET.md §10 참조.
+DEFAULT_SPOOF_ROOT = "gs://qi-ucsd-speech-usw2/curated_spoof/asvspoof2019_la"
+SPOOF_SPLITS = ["train", "dev", "eval"]
 # 최종 HTML 리포트가 저장될 기본 경로 (classifier/reports/dataset_report.html)
 # 이 파일은 classifier/src/dashboard/ 아래에 있으므로 3단계 위가 classifier/.
 REPORT_OUT = Path(__file__).resolve().parent.parent.parent / "reports" / "dataset_report.html"
@@ -137,6 +141,107 @@ def collect_manifests(root: str, classes: list[str]) -> dict[str, pd.DataFrame]:
             dfs[cc] = df
             print(f"  {cc}: {len(df)} clips, {df['speaker'].nunique()} speakers")
     return dfs
+
+
+def read_spoof_manifest(root: str, split: str) -> pd.DataFrame | None:
+    # curated_spoof/<split>/manifest.csv 를 읽는다. 스키마:
+    # fname,source,speaker,key,system_id,split (key=bonafide/spoof).
+    path = f"{root.rstrip('/')}/{split}/manifest.csv"
+    if root.startswith("gs://"):
+        bucket_name, _, prefix = root[len("gs://"):].partition("/")
+        blob_path = f"{prefix}/{split}/manifest.csv" if prefix else f"{split}/manifest.csv"
+        blob = _gcs().bucket(bucket_name).blob(blob_path)
+        if not blob.exists():
+            print(f"  ! spoof/{split}: no manifest at {path}")
+            return None
+        return pd.read_csv(io.StringIO(blob.download_as_text()))
+    local = Path(path)
+    if not local.exists():
+        print(f"  ! spoof/{split}: no manifest at {local}")
+        return None
+    return pd.read_csv(local)
+
+
+def collect_spoof_manifests(root: str, splits: list[str]) -> dict[str, pd.DataFrame]:
+    # splits(train/dev/eval)의 spoof manifest.csv를 모두 읽어 {split: DataFrame}으로 모은다.
+    print(f"Reading spoof manifests from {root} ...")
+    dfs: dict[str, pd.DataFrame] = {}
+    for split in splits:
+        df = read_spoof_manifest(root, split)
+        if df is not None and len(df):
+            dfs[split] = df
+            n_bona = int((df["key"].str.lower() == "bonafide").sum())
+            print(f"  {split}: {len(df)} clips, {n_bona} bonafide, {len(df) - n_bona} spoof, "
+                  f"{df['speaker'].nunique()} speakers")
+    return dfs
+
+
+def chart_spoof_composition(spoof_dfs: dict[str, pd.DataFrame]) -> str:
+    # 스플릿별 bonafide(real)/spoof(fake) 클립 수를 누적 막대그래프로 표시.
+    fig, ax = plt.subplots(figsize=(8.4, 5.2))
+    splits = list(spoof_dfs.keys())
+    bona = [int((spoof_dfs[s]["key"].str.lower() == "bonafide").sum()) for s in splits]
+    spoof = [len(spoof_dfs[s]) - b for s, b in zip(splits, bona)]
+    ax.bar(splits, bona, label="bonafide (real)", color=_PALETTE[1], width=0.5, zorder=3)
+    ax.bar(splits, spoof, bottom=bona, label="spoof (fake)", color=_PALETTE[6], width=0.5, zorder=3)
+    for i, s in enumerate(splits):
+        ax.text(i, bona[i] + spoof[i], f"{bona[i] + spoof[i]:,}", ha="center", va="bottom",
+                fontsize=12, fontweight="bold", color=_INK)
+    ax.set_ylabel("clips")
+    ax.set_title("Spoof corpus: bonafide vs spoof per split")
+    ax.legend(frameon=False)
+    return fig_to_data_uri(fig)
+
+
+def chart_spoof_attack_systems(spoof_dfs: dict[str, pd.DataFrame]) -> str:
+    # 스플릿별 spoof 공격 시스템(system_id) 분포를 보여준다 — train/dev는 A01-A06,
+    # eval은 A07-A19(미지 공격)로 겹치지 않아야 정상(프로토콜 스플릿 보존 여부 육안 확인용).
+    fig, ax = plt.subplots(figsize=(9.6, 5.2))
+    splits = list(spoof_dfs.keys())
+    all_systems = sorted({sid for df in spoof_dfs.values()
+                           for sid in df.loc[df["key"].str.lower() == "spoof", "system_id"].unique()})
+    bottom = [0] * len(splits)
+    for i, sid in enumerate(all_systems):
+        vals = [int(((spoof_dfs[s]["system_id"] == sid) & (spoof_dfs[s]["key"].str.lower() == "spoof")).sum())
+                for s in splits]
+        ax.bar(splits, vals, bottom=bottom, label=sid, color=_PALETTE[i % len(_PALETTE)], width=0.5, zorder=3)
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    ax.set_ylabel("spoof clips")
+    ax.set_title("Spoof attack systems per split (train/dev vs unseen eval)")
+    ax.legend(fontsize=9, frameon=False, ncol=2)
+    return fig_to_data_uri(fig)
+
+
+def build_spoof_summary_table(spoof_dfs: dict[str, pd.DataFrame]) -> str:
+    # 스플릿별 요약: 클립 수, bonafide/spoof, 화자 수, 공격 시스템 목록.
+    rows = []
+    tot_clips = tot_bona = tot_spoof = tot_spk = 0
+    for split, df in spoof_dfs.items():
+        clips = len(df)
+        bona = int((df["key"].str.lower() == "bonafide").sum())
+        spoof = clips - bona
+        speakers = df["speaker"].nunique()
+        systems = df.loc[df["key"].str.lower() == "spoof", "system_id"]
+        sys_range = f"{systems.min()}–{systems.max()}" if len(systems) else "—"
+        ratio = f"{spoof / max(bona, 1):.1f}:1"
+        tot_clips += clips
+        tot_bona += bona
+        tot_spoof += spoof
+        tot_spk += speakers
+        rows.append(f"<tr><td>{split}</td><td>{clips:,}</td><td>{bona:,}</td><td>{spoof:,}</td>"
+                     f"<td>{ratio}</td><td>{speakers}</td><td>{sys_range}</td></tr>")
+    total_row = (f'<tr class="total"><td>Total</td><td>{tot_clips:,}</td><td>{tot_bona:,}</td>'
+                 f"<td>{tot_spoof:,}</td><td>{tot_spoof / max(tot_bona, 1):.1f}:1</td>"
+                 f"<td>{tot_spk}</td><td></td></tr>")
+    note = ('<p class="note">Protocol splits are preserved: train/dev use attacks A01–A06, '
+            "eval uses A07–A19 (unseen at train time) — never re-split randomly. "
+            "bonafide is kept in full as the real anchor; spoof may be capped per split at "
+            "training time (<code>--spoof-cap</code>).</p>")
+    return (
+        "<table><thead><tr><th>Split</th><th>Clips</th><th>Bonafide (real)</th>"
+        "<th>Spoof (fake)</th><th>Spoof:Bona</th><th>Speakers</th><th>Attack systems</th></tr></thead>"
+        "<tbody>" + "".join(rows) + total_row + "</tbody></table>" + note
+    )
 
 
 # fname 접두어 -> 소스 코드. 용량을 소스별로 쪼개 길이를 추정할 때 쓴다.
@@ -418,6 +523,18 @@ BODY_TEMPLATE = """<p class="meta">Source root: <code>{root}</code> &middot; gen
 <div class="chart-card"><img src="{c4}" alt="Gender balance per class"></div>
 <div class="chart-card"><img src="{c5}" alt="Storage per class by source"></div>
 </div>
+{spoof_section}
+"""
+
+# fake(합성음성) 탐지용 spoof 코퍼스 섹션. spoof_dfs가 없으면(root 미지정/미발견)
+# 조용히 빈 문자열을 반환해 country-only 리포트도 그대로 동작한다.
+SPOOF_SECTION_TEMPLATE = """<h2 class="section-title">Spoof (fake-voice) corpus &middot; ASVspoof 2019 LA</h2>
+<p class="meta">Spoof root: <code>{spoof_root}</code></p>
+<div class="card table-card">{table}</div>
+<div class="charts">
+<div class="chart-card"><img src="{c1}" alt="Spoof composition per split"></div>
+<div class="chart-card"><img src="{c2}" alt="Spoof attack systems per split"></div>
+</div>
 """
 
 # 공통 디자인 토큰/베이스 스타일. serve_dataset_report.py도 이 팔레트를 그대로 쓴다
@@ -463,6 +580,7 @@ tr.total td {{ font-weight: 700; border-top: 2px solid var(--accent); background
 .stat-icon {{ font-size: 1.1rem; opacity: .85; }}
 .stat-v {{ font-size: 1.5rem; font-weight: 800; color: var(--ink); margin-top: .15rem; }}
 .stat-k {{ font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: .1rem; }}
+.section-title {{ margin: 2.2rem 0 .9rem; font-size: 1.15rem; font-weight: 800; }}
 .charts {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 1.4rem; }}
 .chart-card {{ background: #ffffff; border: 1px solid var(--border); border-radius: 14px;
               box-shadow: var(--shadow); padding: 1.4rem 1.5rem; display: flex; align-items: center; justify-content: center; }}
@@ -487,12 +605,30 @@ PAGE_TEMPLATE = """<!doctype html>
 """
 
 
-def render_body(root: str, dfs: dict[str, pd.DataFrame]) -> str:
+def render_spoof_section(spoof_root: str | None, spoof_splits: list[str]) -> str:
+    # spoof_root가 없으면(비활성) 빈 문자열 — country-only 리포트 하위호환.
+    if not spoof_root:
+        return ""
+    spoof_dfs = collect_spoof_manifests(spoof_root, spoof_splits)
+    if not spoof_dfs:
+        return ""
+    return SPOOF_SECTION_TEMPLATE.format(
+        spoof_root=spoof_root,
+        table=build_spoof_summary_table(spoof_dfs),
+        c1=chart_spoof_composition(spoof_dfs),
+        c2=chart_spoof_attack_systems(spoof_dfs),
+    )
+
+
+def render_body(root: str, dfs: dict[str, pd.DataFrame], spoof_root: str | None = None,
+                 spoof_splits: list[str] = SPOOF_SPLITS) -> str:
     """Table + charts only — no <html>/<head> wrapper. Shared by CLI and server.
 
     Also reads per-class audio storage stats (object metadata only, no audio
     download) so the report shows total/avg file size and an estimated total
-    duration alongside the clip counts.
+    duration alongside the clip counts. If ``spoof_root`` is given, appends a
+    second section for the fake-voice (ASVspoof) corpus — a separate label
+    axis/manifest schema from the country classes (DATASET.md §10).
     """
     stats = collect_audio_stats(root, list(dfs.keys()))
     return BODY_TEMPLATE.format(
@@ -505,18 +641,23 @@ def render_body(root: str, dfs: dict[str, pd.DataFrame]) -> str:
         c3=chart_source_breakdown(dfs),
         c4=chart_gender_balance(dfs),
         c5=chart_storage_per_class(dfs, stats),
+        spoof_section=render_spoof_section(spoof_root, spoof_splits),
     )
 
 
-def build_report_html(root: str, dfs: dict[str, pd.DataFrame]) -> str:
+def build_report_html(root: str, dfs: dict[str, pd.DataFrame], spoof_root: str | None = None,
+                       spoof_splits: list[str] = SPOOF_SPLITS) -> str:
     """Full standalone HTML page — used for the static file output."""
-    return PAGE_TEMPLATE.format(body=render_body(root, dfs))
+    return PAGE_TEMPLATE.format(body=render_body(root, dfs, spoof_root, spoof_splits))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=DEFAULT_ROOT, help="curated/ root (gs:// URI or local dir)")
     ap.add_argument("--classes", nargs="+", default=DEFAULT_CLASSES)
+    ap.add_argument("--spoof-root", default=DEFAULT_SPOOF_ROOT,
+                     help="curated_spoof/asvspoof2019_la/ root; pass '' to disable the spoof section")
+    ap.add_argument("--spoof-splits", nargs="+", default=SPOOF_SPLITS)
     ap.add_argument("--out", type=Path, default=REPORT_OUT)
     args = ap.parse_args()
 
@@ -526,7 +667,9 @@ def main() -> None:
         raise SystemExit("No manifests found — check --root and --classes.")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(build_report_html(args.root, dfs), encoding="utf-8")
+    args.out.write_text(
+        build_report_html(args.root, dfs, args.spoof_root or None, args.spoof_splits),
+        encoding="utf-8")
     print(f"wrote {args.out}")
 
 

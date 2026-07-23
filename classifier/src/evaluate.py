@@ -42,7 +42,6 @@ from config import (
     LABELS,
     NUM_FAKE_LABELS,
     OUTPUT_DIR,
-    SPOOF_ROOT,
 )
 from dataset import (
     AccentDataset,
@@ -88,18 +87,17 @@ def _eer(scores: np.ndarray, labels: np.ndarray) -> float:
 
 
 @torch.no_grad()
-def evaluate_multitask(model, collator, manifest_path, curated_root, spoof_root,
+def evaluate_multitask(model, collator, manifest_path,
                        batch_size, device, model_dir) -> None:
     """Score both heads on a unified (country + real/fake) manifest.
 
-    Country metrics use only accent rows (country_label != -100); real/fake
-    metrics (acc, macro-F1, per-class recall, EER) use every clip. Prints and
-    writes ``test_report_multitask.json``.
+    Country metrics use only rows with a country label (country_label != -100);
+    real/fake metrics (acc, macro-F1, per-class recall, EER) use every clip.
+    Prints and writes ``test_report_multitask.json``.
     """
-    # 통합 매니페스트에서 두 헤드를 채점한다. 국가 지표는 accent 행만, real/fake 지표
-    # (acc·macro-F1·클래스별 recall·EER)는 전 클립으로 계산한다.
-    ds = MultiTaskDataset(manifest_path, curated_root=curated_root,
-                          spoof_root=spoof_root)
+    # 통합 매니페스트에서 두 헤드를 채점한다. 국가 지표는 국가 라벨이 있는 행만,
+    # real/fake 지표(acc·macro-F1·클래스별 recall·EER)는 전 클립으로 계산한다.
+    ds = MultiTaskDataset(manifest_path)
     loader = DataLoader(ds, batch_size=batch_size, collate_fn=collator)
     print(f"multitask eval: {len(ds)} clips on {device}")
     c_logits, f_logits, c_labels, f_labels = [], [], [], []
@@ -162,8 +160,6 @@ def main() -> None:
     ap.add_argument("--manifest-dir", default=None,
                     help="dir holding test.csv (default: <model-dir>/manifests)")
     ap.add_argument("--curated-root", default=str(CURATED_ROOT))
-    ap.add_argument("--spoof-root", default=str(SPOOF_ROOT),
-                    help="curated_spoof root (multitask manifests only)")
     ap.add_argument("--batch-size", type=int, default=8)
     args = ap.parse_args()
 
@@ -181,7 +177,6 @@ def main() -> None:
         cols = pd.read_csv(test_csv, nrows=0).columns
         if "fake_label" in cols:
             evaluate_multitask(model, MultiTaskCollator(fe), test_csv,
-                               args.curated_root, args.spoof_root,
                                args.batch_size, device, args.model_dir)
             return
 

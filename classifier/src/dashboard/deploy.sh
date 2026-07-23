@@ -37,7 +37,7 @@ gcloud run deploy "${SERVICE}" \
   --cpu=1 \
   --concurrency=80 \
   --timeout=120 \
-  --set-env-vars="^@^DATASET_ROOT=gs://${BUCKET}/curated@DATASET_CLASSES=US,UK,IN,NG,CA,JP,CN,AU,KR"
+  --set-env-vars="^@^DATASET_ROOT=gs://${BUCKET}/curated@DATASET_CLASSES=US,UK,IN,NG,CA,JP,CN,AU,KR@SPOOF_ROOT=gs://${BUCKET}/curated_spoof/asvspoof2019_la"
 
 echo ">> done. URL:"
 gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.url)'

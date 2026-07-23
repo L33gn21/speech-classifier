@@ -49,7 +49,15 @@ from functools import wraps
 
 from flask import Flask, jsonify, redirect, request, session, url_for
 
-from inspect_dataset import DEFAULT_CLASSES, DEFAULT_ROOT, SHARED_STYLE, collect_manifests, render_body
+from inspect_dataset import (
+    DEFAULT_CLASSES,
+    DEFAULT_ROOT,
+    DEFAULT_SPOOF_ROOT,
+    SHARED_STYLE,
+    SPOOF_SPLITS,
+    collect_manifests,
+    render_body,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
@@ -125,6 +133,9 @@ def logout():
 _state = {
     "root": os.environ.get("DATASET_ROOT", DEFAULT_ROOT),
     "classes": os.environ.get("DATASET_CLASSES", ",".join(DEFAULT_CLASSES)).split(","),
+    # fake(합성음성) 탐지용 spoof 코퍼스. SPOOF_ROOT=""로 비활성화 가능.
+    "spoof_root": os.environ.get("SPOOF_ROOT", DEFAULT_SPOOF_ROOT) or None,
+    "spoof_splits": os.environ.get("SPOOF_SPLITS", ",".join(SPOOF_SPLITS)).split(","),
     "body": "<p>Loading...</p>",
     "error": None,
 }
@@ -140,7 +151,7 @@ def _regenerate() -> None:
             with _lock:
                 _state["error"] = "No manifests found under root."
             return
-        body = render_body(_state["root"], dfs)
+        body = render_body(_state["root"], dfs, _state["spoof_root"], _state["spoof_splits"])
         with _lock:
             _state["body"] = body
             _state["error"] = None
