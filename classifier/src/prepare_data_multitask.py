@@ -29,11 +29,29 @@ Label assignment per row:
   - ASVspoof bonafide/spoof (country="NA"): country_label=-100 (ignored by
     the country loss), fake_label=0 (real) / 1 (fake)
 
-NOTE: the precomputed split does NOT preserve ASVspoof's unseen-attack
-(A07-A19 in eval) protocol boundary — whether that boundary should be
-respected instead is an open decision (DATASET.md §11 "Deferred").
-``system_id``/``orig_split`` are kept in the output so a future re-split can
-still make that call without re-touching the bucket.
+NOTE: the precomputed ``split`` column is speaker-disjoint but attack-blind --
+train/val/test all mix A01-A19 (DATASET.md §11), so fake metrics on that
+``test`` are optimistically biased (a model can just recognize attacks it
+already saw in train). ``build_multitask_splits`` fixes this in place, folded
+into the same train/val/test (no 4th bucket): fake rows are re-assigned by
+``system_id`` tier instead of the precomputed column --
+
+  - FAKE_TEST_ONLY_SYSTEMS: 100% test, never train/val (genuinely unseen
+    attacks at eval time).
+  - FAKE_MIXED_SYSTEMS: split across train/val/test like normal (contributes
+    a smaller, still partly-optimistic in-split signal for these systems).
+  - everything else: train/val only, never test.
+
+A01-A06 (orig ASVspoof train/dev, 30 speakers) and A07-A19 (orig eval, 48
+speakers) use two completely disjoint speaker pools (verified against the
+manifest), so as long as the test-only/mixed tiers are drawn from A07-A19,
+there is zero speaker overlap with the train-only tier. Within A07-A19 itself
+the same 48 speakers appear under every system, so a speaker can still show
+up in both train (via a train/val-only system) and test (via a test-only
+system) -- a voice-familiarity leak, strictly weaker than attack-type leakage,
+same tradeoff already accepted for country-real speaker reuse across systems.
+Real rows are untouched (kept on the precomputed column) since bonafide isn't
+attack-bound.
 """
 # 1단계(멀티태스크) — 국가 + real/fake 통합 스플릿 매니페스트 생성.
 # v2 데이터셋 재구축(rebuild_dataset_v2_vm.py, DATASET.md §11)이 만든 평탄한
@@ -49,14 +67,20 @@ from pathlib import Path
 
 import pandas as pd
 
+import random
+
 from config import (
     COUNTRY_IGNORE_INDEX,
     FAKE2ID,
+    FAKE_MIXED_SYSTEMS,
+    FAKE_MIXED_TEST_FRACTION,
+    FAKE_TEST_ONLY_SYSTEMS,
     LABEL2ID,
     REAL_FAKE_ROOT,
     SEED,
     TEST_FRACTION,
     VAL_FRACTION,
+    gcs_to_fuse,
 )
 
 UNIFIED_COLS = ["filename", "audio_uri", "country", "country_label", "fake_label",
@@ -65,7 +89,7 @@ UNIFIED_COLS = ["filename", "audio_uri", "country", "country_label", "fake_label
 
 def load_real_fake_pool(real_fake_root: Path) -> pd.DataFrame:
     """Read curated_spoof/real_fake_5k/manifest.csv (raw source schema)."""
-    mpath = Path(real_fake_root) / "manifest.csv"
+    mpath = Path(gcs_to_fuse(str(real_fake_root))) / "manifest.csv"
     df = pd.read_csv(mpath, dtype=str, keep_default_na=False)
     if "split" not in df.columns:
         raise ValueError(
@@ -94,25 +118,98 @@ def _to_unified(df: pd.DataFrame) -> pd.DataFrame:
     })
 
 
+def _assign_by_speaker(speakers: list[str], fractions: dict[str, float],
+                        seed: int) -> dict[str, str]:
+    """Deterministically bucket a speaker list into fractions.keys() so every
+    clip from the same speaker lands in the same bucket. fractions must sum
+    to (approximately) 1."""
+    ordered = sorted(speakers)
+    rng = random.Random(seed)
+    rng.shuffle(ordered)
+    n = len(ordered)
+    assignment: dict[str, str] = {}
+    start = 0
+    items = list(fractions.items())
+    for i, (bucket, frac) in enumerate(items):
+        count = n - start if i == len(items) - 1 else round(n * frac)
+        for spk in ordered[start:start + count]:
+            assignment[spk] = bucket
+        start += count
+    return assignment
+
+
 def build_multitask_splits(
     real_fake_root: Path = REAL_FAKE_ROOT,
     val_fraction: float = VAL_FRACTION,
     test_fraction: float = TEST_FRACTION,
     seed: int = SEED,
+    fake_test_only_systems: frozenset[str] = FAKE_TEST_ONLY_SYSTEMS,
+    fake_mixed_systems: frozenset[str] = FAKE_MIXED_SYSTEMS,
+    fake_mixed_test_fraction: float = FAKE_MIXED_TEST_FRACTION,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load the pre-balanced real/fake pool, split by its precomputed ``split``
-    column. ``val_fraction``/``test_fraction``/``seed`` are accepted for call-site
-    compatibility but unused -- the split is already fixed in the manifest."""
+    """Load the pre-balanced real/fake pool. Real rows keep the precomputed
+    ``split`` column (bonafide isn't attack-bound). Fake rows are instead
+    re-assigned by ``system_id`` tier (see module docstring) so test.csv
+    itself carries a genuinely-unseen-attack slice, without a 4th bucket:
+
+      - fake_test_only_systems -> 100% test
+      - fake_mixed_systems -> split train/val/test as usual (test share =
+        fake_mixed_test_fraction, remainder split train:val at the same
+        ratio as train_fraction:val_fraction)
+      - everything else -> split train/val only (never test), at
+        train_fraction:val_fraction
+
+    ``test_fraction``/``val_fraction`` drive both the "everything else" and
+    the "mixed" train:val split; ``fake_mixed_test_fraction`` is the extra
+    knob that controls how large the honest unseen-attack slice of test is.
+    """
     raw = load_real_fake_pool(real_fake_root)
     df = _to_unified(raw)
-    train = df[df["split"] == "train"].reset_index(drop=True)
-    val = df[df["split"] == "val"].reset_index(drop=True)
-    test = df[df["split"] == "test"].reset_index(drop=True)
 
-    tr, va, te = set(train["speaker"]), set(val["speaker"]), set(test["speaker"])
-    assert not (tr & va), f"speaker leakage train/val: {len(tr & va)}"
-    assert not (tr & te), f"speaker leakage train/test: {len(tr & te)}"
-    assert not (va & te), f"speaker leakage val/test: {len(va & te)}"
+    real = df[df["fake_label"] == FAKE2ID["real"]]
+    fake = df[df["fake_label"] == FAKE2ID["fake"]]
+
+    test_only = fake[fake["system_id"].isin(fake_test_only_systems)]
+    mixed = fake[fake["system_id"].isin(fake_mixed_systems)]
+    rest = fake[~fake["system_id"].isin(fake_test_only_systems | fake_mixed_systems)]
+
+    train_val_ratio = {
+        "train": (1 - val_fraction - test_fraction) / (1 - test_fraction),
+        "val": val_fraction / (1 - test_fraction),
+    }
+    rest_assign = _assign_by_speaker(list(rest["speaker"].unique()), train_val_ratio, seed)
+    rest_split = rest["speaker"].map(rest_assign)
+
+    mixed_ratio = {
+        "test": fake_mixed_test_fraction,
+        "train": (1 - fake_mixed_test_fraction) * train_val_ratio["train"],
+        "val": (1 - fake_mixed_test_fraction) * train_val_ratio["val"],
+    }
+    mixed_assign = _assign_by_speaker(list(mixed["speaker"].unique()), mixed_ratio, seed + 1)
+    mixed_split = mixed["speaker"].map(mixed_assign)
+
+    fake_train = pd.concat([rest[rest_split == "train"], mixed[mixed_split == "train"]])
+    fake_val = pd.concat([rest[rest_split == "val"], mixed[mixed_split == "val"]])
+    fake_test = pd.concat([test_only, mixed[mixed_split == "test"]])
+
+    train = pd.concat([real[real["split"] == "train"], fake_train]).reset_index(drop=True)
+    val = pd.concat([real[real["split"] == "val"], fake_val]).reset_index(drop=True)
+    test = pd.concat([real[real["split"] == "test"], fake_test]).reset_index(drop=True)
+
+    # Real stays fully speaker-disjoint (unchanged precomputed column). Fake
+    # is only disjoint ACROSS tiers by construction (test-only/mixed systems
+    # are drawn from A07-A19, disjoint from the A01-A06 pool used by "rest"
+    # when rest includes any A01-A06 rows) -- WITHIN A07-A19 the same 48
+    # speakers appear under every system, so a speaker can legitimately land
+    # in both train (via a train/val-only system) and test (via a
+    # test-only/mixed system). That's an accepted, weaker voice-familiarity
+    # leak (see module docstring), not asserted against here.
+    real_tr, real_va, real_te = (set(real[real["split"] == s]["speaker"])
+                                 for s in ("train", "val", "test"))
+    assert not (real_tr & real_va), f"real speaker leakage train/val: {len(real_tr & real_va)}"
+    assert not (real_tr & real_te), f"real speaker leakage train/test: {len(real_tr & real_te)}"
+    assert not (real_va & real_te), f"real speaker leakage val/test: {len(real_va & real_te)}"
+
     return train[UNIFIED_COLS], val[UNIFIED_COLS], test[UNIFIED_COLS]
 
 

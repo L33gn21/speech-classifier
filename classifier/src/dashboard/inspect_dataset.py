@@ -9,8 +9,8 @@ with a "Refresh" button that re-reads the manifests on demand.
 
 Usage:
     python inspect_dataset.py
-    python inspect_dataset.py --root gs://qi-ucsd-speech-us/curated
-    python inspect_dataset.py --root ../curated --classes US UK IN KR
+    python inspect_dataset.py --root gs://qi-ucsd-speech-usw2/curated
+    python inspect_dataset.py --root ../curated --classes US UK CA AU IN CN
 
 Live dashboard (refresh button, no need to re-run manually):
     python serve_dataset_report.py
@@ -39,6 +39,7 @@ import argparse
 import base64
 import datetime
 import io
+import random
 from pathlib import Path
 
 import matplotlib
@@ -85,12 +86,30 @@ plt.rcParams.update({
     "axes.axisbelow": True,
 })
 
-DEFAULT_ROOT = "gs://qi-ucsd-speech-us/curated"
-DEFAULT_CLASSES = ["US", "UK", "IN", "NG", "CA", "JP", "CN", "AU", "KR"]
-# fake(합성음성) 탐지용 spoof 코퍼스 — 국가 curated/와 다른 프리픽스/스키마
-# (fname,source,speaker,key,system_id,split). DATASET.md §10 참조.
-DEFAULT_SPOOF_ROOT = "gs://qi-ucsd-speech-usw2/curated_spoof/asvspoof2019_la"
-SPOOF_SPLITS = ["train", "dev", "eval"]
+DEFAULT_ROOT = "gs://qi-ucsd-speech-usw2/curated"
+# 실제 빌드된 6클래스(country/accent 헤드). NG/JP는 소스 부재로 미구축, KR은
+# 반출 제한으로 별도 asia-northeast3 버킷 — 이 대시보드(usw2)에는 없음. DATASET.md §5.
+DEFAULT_CLASSES = ["US", "UK", "CA", "AU", "IN", "CN"]
+# fake(합성음성) 탐지용 spoof 코퍼스 — v2 재구축(2026-07-22)으로 real:fake=35000:35000
+# 평탄(flat) 풀로 교체됨. 국가 curated/와 다른 프리픽스/스키마
+# (label,country,source,system_id,speaker,orig_split,fname,audio_uri,split).
+# 옛 curated_spoof/asvspoof2019_la/{train,dev,eval}/ 는 이제 이 풀의 read-only
+# 소스 데이터일 뿐 학습에도, 이 대시보드에도 더는 쓰이지 않는다. DATASET.md §10-11.
+DEFAULT_SPOOF_ROOT = "gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k"
+SPOOF_SPLITS = ["train", "val", "test"]
+# real_fake_5k의 precomputed split(화자 단위)은 공격 유형(system_id)을 가리지
+# 않아 test의 fake 지표가 낙관 편향된다 -- 그래서 fake 행만 system_id 티어로
+# 재배정해 test.csv 자체에 진짜 미지공격을 섞는다(4번째 버킷 없이). real은
+# precomputed split 그대로. classifier/src/config.py의 FAKE_TEST_ONLY_SYSTEMS/
+# FAKE_MIXED_SYSTEMS/FAKE_MIXED_TEST_FRACTION, src/prepare_data_multitask.py의
+# build_multitask_splits와 동일 로직 — 이 대시보드 컨테이너는 src/를 import하지
+# 않으므로(Dockerfile이 이 파일 + serve_dataset_report.py만 복사) 값을 중복
+# 유지한다. 값 바꾸면 두 곳 다 갱신할 것.
+FAKE_TEST_ONLY_SYSTEMS = frozenset({"A17", "A18", "A19"})
+FAKE_MIXED_SYSTEMS = frozenset({"A16"})
+FAKE_MIXED_TEST_FRACTION = 0.33
+_VAL_FRACTION = 0.15
+_TEST_FRACTION = 0.15
 # 최종 HTML 리포트가 저장될 기본 경로 (classifier/reports/dataset_report.html)
 # 이 파일은 classifier/src/dashboard/ 아래에 있으므로 3단계 위가 classifier/.
 REPORT_OUT = Path(__file__).resolve().parent.parent.parent / "reports" / "dataset_report.html"
@@ -143,103 +162,186 @@ def collect_manifests(root: str, classes: list[str]) -> dict[str, pd.DataFrame]:
     return dfs
 
 
-def read_spoof_manifest(root: str, split: str) -> pd.DataFrame | None:
-    # curated_spoof/<split>/manifest.csv 를 읽는다. 스키마:
-    # fname,source,speaker,key,system_id,split (key=bonafide/spoof).
-    path = f"{root.rstrip('/')}/{split}/manifest.csv"
+def read_real_fake_manifest(root: str) -> pd.DataFrame | None:
+    # curated_spoof/real_fake_5k/manifest.csv 를 읽는다 (평탄한 단일 파일, 스플릿별
+    # 하위 디렉터리 없음). 스키마: label(real/fake), country, source, system_id,
+    # speaker, orig_split, fname, audio_uri, split(train/val/test). DATASET.md §11.
+    # ASVspoof(real anchor)의 country 값이 문자 그대로 "NA"라서, pandas 기본
+    # na_values(NA 포함)에 걸려 NaN으로 깨지지 않도록 keep_default_na=False.
+    path = f"{root.rstrip('/')}/manifest.csv"
     if root.startswith("gs://"):
         bucket_name, _, prefix = root[len("gs://"):].partition("/")
-        blob_path = f"{prefix}/{split}/manifest.csv" if prefix else f"{split}/manifest.csv"
+        blob_path = f"{prefix}/manifest.csv" if prefix else "manifest.csv"
         blob = _gcs().bucket(bucket_name).blob(blob_path)
         if not blob.exists():
-            print(f"  ! spoof/{split}: no manifest at {path}")
+            print(f"  ! real/fake pool: no manifest at {path}")
             return None
-        return pd.read_csv(io.StringIO(blob.download_as_text()))
+        return pd.read_csv(io.StringIO(blob.download_as_text()), keep_default_na=False)
     local = Path(path)
     if not local.exists():
-        print(f"  ! spoof/{split}: no manifest at {local}")
+        print(f"  ! real/fake pool: no manifest at {local}")
         return None
-    return pd.read_csv(local)
+    return pd.read_csv(local, keep_default_na=False)
+
+
+def _assign_by_speaker(speakers: list[str], fractions: dict[str, float], seed: int) -> dict[str, str]:
+    # src/prepare_data_multitask.py::_assign_by_speaker 와 동일 로직(중복 유지, 위 상수 주석 참고).
+    ordered = sorted(speakers)
+    rng = random.Random(seed)
+    rng.shuffle(ordered)
+    n = len(ordered)
+    assignment: dict[str, str] = {}
+    start = 0
+    items = list(fractions.items())
+    for i, (bucket, frac) in enumerate(items):
+        count = n - start if i == len(items) - 1 else round(n * frac)
+        for spk in ordered[start:start + count]:
+            assignment[spk] = bucket
+        start += count
+    return assignment
 
 
 def collect_spoof_manifests(root: str, splits: list[str]) -> dict[str, pd.DataFrame]:
-    # splits(train/dev/eval)의 spoof manifest.csv를 모두 읽어 {split: DataFrame}으로 모은다.
-    print(f"Reading spoof manifests from {root} ...")
+    # 평탄 매니페스트를 한 번 읽는다. real은 precomputed split 컬럼 그대로, fake는
+    # system_id 티어로 재배정한다(src/prepare_data_multitask.py::build_multitask_splits
+    # 와 동일 로직 -- 대시보드도 학습 파이프라인이 실제로 보는 분할과 일치시킨다).
+    print(f"Reading real/fake manifest from {root} ...")
+    df = read_real_fake_manifest(root)
+    if df is None or not len(df):
+        return {}
+
+    real = df[df["label"] == "real"]
+    fake = df[df["label"] == "fake"]
+    test_only = fake[fake["system_id"].isin(FAKE_TEST_ONLY_SYSTEMS)]
+    mixed = fake[fake["system_id"].isin(FAKE_MIXED_SYSTEMS)]
+    rest = fake[~fake["system_id"].isin(FAKE_TEST_ONLY_SYSTEMS | FAKE_MIXED_SYSTEMS)]
+
+    train_val_ratio = {
+        "train": (1 - _VAL_FRACTION - _TEST_FRACTION) / (1 - _TEST_FRACTION),
+        "val": _VAL_FRACTION / (1 - _TEST_FRACTION),
+    }
+    rest_assign = _assign_by_speaker(list(rest["speaker"].unique()), train_val_ratio, 42)
+    rest_split = rest["speaker"].map(rest_assign)
+
+    mixed_ratio = {
+        "test": FAKE_MIXED_TEST_FRACTION,
+        "train": (1 - FAKE_MIXED_TEST_FRACTION) * train_val_ratio["train"],
+        "val": (1 - FAKE_MIXED_TEST_FRACTION) * train_val_ratio["val"],
+    }
+    mixed_assign = _assign_by_speaker(list(mixed["speaker"].unique()), mixed_ratio, 43)
+    mixed_split = mixed["speaker"].map(mixed_assign)
+
+    fake_by_split = {
+        "train": pd.concat([rest[rest_split == "train"], mixed[mixed_split == "train"]]),
+        "val": pd.concat([rest[rest_split == "val"], mixed[mixed_split == "val"]]),
+        "test": pd.concat([test_only, mixed[mixed_split == "test"]]),
+    }
+
     dfs: dict[str, pd.DataFrame] = {}
     for split in splits:
-        df = read_spoof_manifest(root, split)
-        if df is not None and len(df):
-            dfs[split] = df
-            n_bona = int((df["key"].str.lower() == "bonafide").sum())
-            print(f"  {split}: {len(df)} clips, {n_bona} bonafide, {len(df) - n_bona} spoof, "
-                  f"{df['speaker'].nunique()} speakers")
+        sdf = pd.concat([real[real["split"] == split], fake_by_split.get(split, real.iloc[:0])])
+        if len(sdf):
+            dfs[split] = sdf
+            n_real = int((sdf["label"] == "real").sum())
+            print(f"  {split}: {len(sdf)} clips, {n_real} real, {len(sdf) - n_real} fake, "
+                  f"{sdf['speaker'].nunique()} speakers")
     return dfs
 
 
 def chart_spoof_composition(spoof_dfs: dict[str, pd.DataFrame]) -> str:
-    # 스플릿별 bonafide(real)/spoof(fake) 클립 수를 누적 막대그래프로 표시.
+    # 스플릿별 real/fake 클립 수를 누적 막대그래프로 표시.
     fig, ax = plt.subplots(figsize=(8.4, 5.2))
     splits = list(spoof_dfs.keys())
-    bona = [int((spoof_dfs[s]["key"].str.lower() == "bonafide").sum()) for s in splits]
-    spoof = [len(spoof_dfs[s]) - b for s, b in zip(splits, bona)]
-    ax.bar(splits, bona, label="bonafide (real)", color=_PALETTE[1], width=0.5, zorder=3)
-    ax.bar(splits, spoof, bottom=bona, label="spoof (fake)", color=_PALETTE[6], width=0.5, zorder=3)
+    real = [int((spoof_dfs[s]["label"] == "real").sum()) for s in splits]
+    fake = [len(spoof_dfs[s]) - r for s, r in zip(splits, real)]
+    ax.bar(splits, real, label="real", color=_PALETTE[1], width=0.5, zorder=3)
+    ax.bar(splits, fake, bottom=real, label="fake", color=_PALETTE[6], width=0.5, zorder=3)
     for i, s in enumerate(splits):
-        ax.text(i, bona[i] + spoof[i], f"{bona[i] + spoof[i]:,}", ha="center", va="bottom",
+        ax.text(i, real[i] + fake[i], f"{real[i] + fake[i]:,}", ha="center", va="bottom",
                 fontsize=12, fontweight="bold", color=_INK)
     ax.set_ylabel("clips")
-    ax.set_title("Spoof corpus: bonafide vs spoof per split")
+    ax.set_title("Real/fake pool: composition per split")
     ax.legend(frameon=False)
     return fig_to_data_uri(fig)
 
 
 def chart_spoof_attack_systems(spoof_dfs: dict[str, pd.DataFrame]) -> str:
-    # 스플릿별 spoof 공격 시스템(system_id) 분포를 보여준다 — train/dev는 A01-A06,
-    # eval은 A07-A19(미지 공격)로 겹치지 않아야 정상(프로토콜 스플릿 보존 여부 육안 확인용).
+    # 스플릿별 fake 공격 시스템(system_id) 분포. v2 재구축 이후 train/val/test는
+    # 화자단위 무작위 분할이라 A01-A19가 세 스플릿에 모두 섞여 있는 게 정상
+    # (더 이상 ASVspoof의 미지-공격 프로토콜 경계를 보존하지 않음, DATASET.md §11 §12).
     fig, ax = plt.subplots(figsize=(9.6, 5.2))
     splits = list(spoof_dfs.keys())
     all_systems = sorted({sid for df in spoof_dfs.values()
-                           for sid in df.loc[df["key"].str.lower() == "spoof", "system_id"].unique()})
+                           for sid in df.loc[df["label"] == "fake", "system_id"].unique()})
     bottom = [0] * len(splits)
     for i, sid in enumerate(all_systems):
-        vals = [int(((spoof_dfs[s]["system_id"] == sid) & (spoof_dfs[s]["key"].str.lower() == "spoof")).sum())
+        vals = [int(((spoof_dfs[s]["system_id"] == sid) & (spoof_dfs[s]["label"] == "fake")).sum())
                 for s in splits]
         ax.bar(splits, vals, bottom=bottom, label=sid, color=_PALETTE[i % len(_PALETTE)], width=0.5, zorder=3)
         bottom = [b + v for b, v in zip(bottom, vals)]
-    ax.set_ylabel("spoof clips")
-    ax.set_title("Spoof attack systems per split (train/dev vs unseen eval)")
+    ax.set_ylabel("fake clips")
+    ax.set_title("Fake attack systems per split (train/val/test, random speaker split)")
+    ax.legend(fontsize=9, frameon=False, ncol=2)
+    return fig_to_data_uri(fig)
+
+
+def chart_real_by_country(spoof_dfs: dict[str, pd.DataFrame]) -> str:
+    # real 쪽 구성 — 국가 6버킷(US/UK/CA/AU/IN/CN) + ASVspoof bonafide(NA)를
+    # 스플릿별 누적 막대그래프로 표시. AU/IN/CN은 5000 채우려고 중복복사(dup)로
+    # 보강됐음(DATASET.md §11) — 이 차트는 그 보강까지 포함한 최종 구성이다.
+    fig, ax = plt.subplots(figsize=(9.2, 5.2))
+    splits = list(spoof_dfs.keys())
+    all_countries = sorted({c for df in spoof_dfs.values()
+                             for c in df.loc[df["label"] == "real", "country"].unique()})
+    bottom = [0] * len(splits)
+    for i, country in enumerate(all_countries):
+        vals = [int(((spoof_dfs[s]["country"] == country) & (spoof_dfs[s]["label"] == "real")).sum())
+                for s in splits]
+        ax.bar(splits, vals, bottom=bottom, label=country, color=_PALETTE[i % len(_PALETTE)],
+               width=0.5, zorder=3)
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    ax.set_ylabel("real clips")
+    ax.set_title("Real side: country breakdown per split (NA = ASVspoof bonafide)")
     ax.legend(fontsize=9, frameon=False, ncol=2)
     return fig_to_data_uri(fig)
 
 
 def build_spoof_summary_table(spoof_dfs: dict[str, pd.DataFrame]) -> str:
-    # 스플릿별 요약: 클립 수, bonafide/spoof, 화자 수, 공격 시스템 목록.
+    # 스플릿별 요약: 클립 수, real/fake, 화자 수, 공격 시스템 목록.
     rows = []
-    tot_clips = tot_bona = tot_spoof = tot_spk = 0
+    tot_clips = tot_real = tot_fake = tot_spk = 0
     for split, df in spoof_dfs.items():
         clips = len(df)
-        bona = int((df["key"].str.lower() == "bonafide").sum())
-        spoof = clips - bona
+        real = int((df["label"] == "real").sum())
+        fake = clips - real
         speakers = df["speaker"].nunique()
-        systems = df.loc[df["key"].str.lower() == "spoof", "system_id"]
+        systems = df.loc[df["label"] == "fake", "system_id"]
+        systems = systems[systems != "-"]
         sys_range = f"{systems.min()}–{systems.max()}" if len(systems) else "—"
-        ratio = f"{spoof / max(bona, 1):.1f}:1"
+        ratio = f"{fake / max(real, 1):.1f}:1"
         tot_clips += clips
-        tot_bona += bona
-        tot_spoof += spoof
+        tot_real += real
+        tot_fake += fake
         tot_spk += speakers
-        rows.append(f"<tr><td>{split}</td><td>{clips:,}</td><td>{bona:,}</td><td>{spoof:,}</td>"
+        rows.append(f"<tr><td>{split}</td><td>{clips:,}</td><td>{real:,}</td><td>{fake:,}</td>"
                      f"<td>{ratio}</td><td>{speakers}</td><td>{sys_range}</td></tr>")
-    total_row = (f'<tr class="total"><td>Total</td><td>{tot_clips:,}</td><td>{tot_bona:,}</td>'
-                 f"<td>{tot_spoof:,}</td><td>{tot_spoof / max(tot_bona, 1):.1f}:1</td>"
+    total_row = (f'<tr class="total"><td>Total</td><td>{tot_clips:,}</td><td>{tot_real:,}</td>'
+                 f"<td>{tot_fake:,}</td><td>{tot_fake / max(tot_real, 1):.1f}:1</td>"
                  f"<td>{tot_spk}</td><td></td></tr>")
-    note = ('<p class="note">Protocol splits are preserved: train/dev use attacks A01–A06, '
-            "eval uses A07–A19 (unseen at train time) — never re-split randomly. "
-            "bonafide is kept in full as the real anchor; spoof may be capped per split at "
-            "training time (<code>--spoof-cap</code>).</p>")
+    note = ('<p class="note">v2 rebuild (2026-07-22): a flat real:fake = 35,000:35,000 pool. '
+            "real = 6 country buckets (5,000 each, AU/IN/CN topped up by duplicate-copy) + "
+            "5,000 ASVspoof bonafide, kept on its precomputed speaker-disjoint 70:15:15 split. "
+            "fake = 35,000 ASVspoof spoof, re-assigned by attack-system tier instead "
+            f"(2026-07-23 fix): systems {', '.join(sorted(FAKE_TEST_ONLY_SYSTEMS))} are "
+            "100% test (never trained on), "
+            f"{', '.join(sorted(FAKE_MIXED_SYSTEMS))} split "
+            f"{FAKE_MIXED_TEST_FRACTION:.0%} to test / rest train+val, everything else is "
+            "train+val only. So <b>test already contains a genuinely-unseen-attack slice</b> "
+            "without a separate eval step, while train/val/test stay close to 70:15:15 and "
+            "real:fake close to 1:1 in every split — DATASET.md §11.</p>")
     return (
-        "<table><thead><tr><th>Split</th><th>Clips</th><th>Bonafide (real)</th>"
-        "<th>Spoof (fake)</th><th>Spoof:Bona</th><th>Speakers</th><th>Attack systems</th></tr></thead>"
+        "<table><thead><tr><th>Split</th><th>Clips</th><th>Real</th>"
+        "<th>Fake</th><th>Fake:Real</th><th>Speakers</th><th>Attack systems</th></tr></thead>"
         "<tbody>" + "".join(rows) + total_row + "</tbody></table>" + note
     )
 
@@ -526,14 +628,15 @@ BODY_TEMPLATE = """<p class="meta">Source root: <code>{root}</code> &middot; gen
 {spoof_section}
 """
 
-# fake(합성음성) 탐지용 spoof 코퍼스 섹션. spoof_dfs가 없으면(root 미지정/미발견)
+# fake(합성음성) 탐지용 real/fake 풀 섹션. spoof_dfs가 없으면(root 미지정/미발견)
 # 조용히 빈 문자열을 반환해 country-only 리포트도 그대로 동작한다.
-SPOOF_SECTION_TEMPLATE = """<h2 class="section-title">Spoof (fake-voice) corpus &middot; ASVspoof 2019 LA</h2>
-<p class="meta">Spoof root: <code>{spoof_root}</code></p>
+SPOOF_SECTION_TEMPLATE = """<h2 class="section-title">Real/fake (fake-voice) pool &middot; curated_spoof/real_fake_5k</h2>
+<p class="meta">Pool root: <code>{spoof_root}</code></p>
 <div class="card table-card">{table}</div>
 <div class="charts">
-<div class="chart-card"><img src="{c1}" alt="Spoof composition per split"></div>
-<div class="chart-card"><img src="{c2}" alt="Spoof attack systems per split"></div>
+<div class="chart-card"><img src="{c1}" alt="Real/fake composition per split"></div>
+<div class="chart-card"><img src="{c2}" alt="Real side country breakdown per split"></div>
+<div class="chart-card"><img src="{c3}" alt="Fake attack systems per split"></div>
 </div>
 """
 
@@ -616,7 +719,8 @@ def render_spoof_section(spoof_root: str | None, spoof_splits: list[str]) -> str
         spoof_root=spoof_root,
         table=build_spoof_summary_table(spoof_dfs),
         c1=chart_spoof_composition(spoof_dfs),
-        c2=chart_spoof_attack_systems(spoof_dfs),
+        c2=chart_real_by_country(spoof_dfs),
+        c3=chart_spoof_attack_systems(spoof_dfs),
     )
 
 
@@ -656,7 +760,7 @@ def main() -> None:
     ap.add_argument("--root", default=DEFAULT_ROOT, help="curated/ root (gs:// URI or local dir)")
     ap.add_argument("--classes", nargs="+", default=DEFAULT_CLASSES)
     ap.add_argument("--spoof-root", default=DEFAULT_SPOOF_ROOT,
-                     help="curated_spoof/asvspoof2019_la/ root; pass '' to disable the spoof section")
+                     help="curated_spoof/real_fake_5k/ root; pass '' to disable the real/fake section")
     ap.add_argument("--spoof-splits", nargs="+", default=SPOOF_SPLITS)
     ap.add_argument("--out", type=Path, default=REPORT_OUT)
     args = ap.parse_args()

@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -33,7 +35,8 @@ from sklearn.metrics import (
     roc_curve,
 )
 from torch.utils.data import DataLoader
-from transformers import AutoFeatureExtractor
+from tqdm import tqdm
+from transformers import AutoFeatureExtractor, TrainingArguments
 
 from config import (
     COUNTRY_IGNORE_INDEX,
@@ -50,6 +53,7 @@ from dataset import (
     MultiTaskDataset,
 )
 from model import AccentClassifier, load_from_dir
+from train import MultiTaskTrainer, compute_metrics_multitask, detailed_report
 
 
 def load_trained(model_dir: str) -> AccentClassifier:
@@ -86,32 +90,60 @@ def _eer(scores: np.ndarray, labels: np.ndarray) -> float:
     return float((fpr[i] + fnr[i]) / 2.0)
 
 
-@torch.no_grad()
-def evaluate_multitask(model, collator, manifest_path,
-                       batch_size, device, model_dir) -> None:
+def evaluate_multitask(model, feature_extractor, manifest_path,
+                       batch_size, device, model_dir,
+                       report_name="test_report_multitask.json") -> None:
     """Score both heads on a unified (country + real/fake) manifest.
+
+    Uses ``Trainer.predict()`` via ``MultiTaskTrainer`` (imported from
+    train.py) instead of a hand-rolled ``DataLoader`` loop. The old manual
+    loop hung indefinitely on the first batch (CPU and GPU, any
+    ``num_workers`` -- root cause never found, see
+    reports/2026-07-23-mt-v2-a100-sweep.md). ``trainer.predict()`` exercises
+    the *exact* dataset/collator/model combination that every training job
+    already runs successfully right after ``trainer.train()`` (train.py
+    ``run_multitask``, which is how ``final_metrics.json``'s ``test_*`` keys
+    get populated in the first place) -- so reusing it here sidesteps
+    whatever the standalone loop tripped on, rather than re-diagnosing it.
 
     Country metrics use only rows with a country label (country_label != -100);
     real/fake metrics (acc, macro-F1, per-class recall, EER) use every clip.
-    Prints and writes ``test_report_multitask.json``.
+    Prints and writes ``test_report_multitask.json``, and -- when
+    ``final_metrics.json`` already exists next to the model (i.e. this is a
+    post-hoc re-score of an already-trained job) -- merges the refreshed
+    scalars plus a per-country ``{prefix}_detail`` block into it, so
+    model_tester's ``get_metrics()`` picks up the per-country breakdown with
+    no frontend changes.
     """
     # 통합 매니페스트에서 두 헤드를 채점한다. 국가 지표는 국가 라벨이 있는 행만,
     # real/fake 지표(acc·macro-F1·클래스별 recall·EER)는 전 클립으로 계산한다.
+    # train.py 의 run_multitask() 가 trainer.train() 직후 이미 성공적으로 쓰고 있는
+    # 것과 동일한 Trainer.predict() 경로를 그대로 재사용한다(수작업 루프는 원인불명
+    # hang, 위 문서 참고) — 같은 데이터셋·콜레이터·모델 조합이므로 그대로 통한다.
     ds = MultiTaskDataset(manifest_path)
-    loader = DataLoader(ds, batch_size=batch_size, collate_fn=collator)
-    print(f"multitask eval: {len(ds)} clips on {device}")
-    c_logits, f_logits, c_labels, f_labels = [], [], [], []
-    for batch in loader:
-        cl = batch.pop("country_labels")
-        fl = batch.pop("fake_labels")
-        batch = {k: v.to(device) for k, v in batch.items()}
-        out = model(**batch)
-        c_logits.append(out.logits.cpu().numpy())
-        f_logits.append(out.fake_logits.cpu().numpy())
-        c_labels.append(cl.numpy())
-        f_labels.append(fl.numpy())
-    c_logits = np.concatenate(c_logits); f_logits = np.concatenate(f_logits)
-    c_labels = np.concatenate(c_labels); f_labels = np.concatenate(f_labels)
+    collator = MultiTaskCollator(feature_extractor)
+    print(f"multitask eval: {len(ds)} clips on {device}", flush=True)
+
+    metric_prefix = "eval" if Path(manifest_path).stem == "val" else "test"
+    # local scratch dir (never the GCS-FUSE model_dir) -- predict() alone
+    # doesn't checkpoint, but TrainingArguments still wants a writable path.
+    training_args = TrainingArguments(
+        output_dir=tempfile.mkdtemp(prefix="mt_eval_"),
+        per_device_eval_batch_size=batch_size,
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+        label_names=["country_labels", "fake_labels"],
+        report_to=[],
+    )
+    trainer = MultiTaskTrainer(
+        model=model, args=training_args, data_collator=collator,
+        compute_metrics=compute_metrics_multitask,
+    )
+    pred = trainer.predict(ds, metric_key_prefix=metric_prefix)
+    c_logits, f_logits = pred.predictions
+    c_labels, f_labels = pred.label_ids
+    metrics = pred.metrics
+    print("metrics:", json.dumps(metrics, indent=2))
 
     fake_ids = list(range(NUM_FAKE_LABELS))
     fp = np.argmax(f_logits, axis=-1)
@@ -132,6 +164,7 @@ def evaluate_multitask(model, collator, manifest_path,
             "confusion_matrix": confusion_matrix(f_labels, fp, labels=fake_ids).tolist(),
         }
     }
+    country_detail = None
     mask = c_labels != COUNTRY_IGNORE_INDEX
     if mask.any():
         ids = list(range(len(LABELS)))
@@ -141,15 +174,28 @@ def evaluate_multitask(model, collator, manifest_path,
         print(f"macro_f1 : {f1_score(cl, cp, average='macro', labels=ids):.4f}")
         print(classification_report(cl, cp, labels=ids, target_names=LABELS,
                                     digits=4, zero_division=0))
-        out["country"] = {
-            "accuracy": float(accuracy_score(cl, cp)),
-            "macro_f1": float(f1_score(cl, cp, average="macro", labels=ids)),
-            "confusion_matrix": confusion_matrix(cl, cp, labels=ids).tolist(),
-        }
-    dest = os.path.join(model_dir, "test_report_multitask.json")
+        country_detail = detailed_report(cp, cl)  # labels/per_class/confusion_matrix
+        out["country"] = country_detail
+    dest = os.path.join(model_dir, report_name)
     with open(dest, "w") as f:
         json.dump(out, f, indent=2)
     print(f"\nsaved {dest}")
+
+    # Post-hoc re-score of an already-trained job: merge into final_metrics.json
+    # so model_tester's get_metrics() serves the per-country breakdown without
+    # any frontend change (it already reads test_detail/eval_detail there).
+    final_path = os.path.join(model_dir, "final_metrics.json")
+    if os.path.exists(final_path):
+        with open(final_path) as f:
+            fm = json.load(f)
+        fm.update(metrics)
+        if country_detail is not None:
+            fm[f"{metric_prefix}_detail"] = country_detail
+        with open(final_path, "w") as f:
+            json.dump(fm, f, indent=2)
+        print(f"merged into {final_path} "
+              f"(refreshed {metric_prefix}_* scalars"
+              f"{' + ' + metric_prefix + '_detail' if country_detail is not None else ''})")
 
 
 @torch.no_grad()
@@ -159,6 +205,9 @@ def main() -> None:
     # 학습 잡이 model-dir/manifests 아래에 test.csv 를 함께 저장한다.
     ap.add_argument("--manifest-dir", default=None,
                     help="dir holding test.csv (default: <model-dir>/manifests)")
+    ap.add_argument("--manifest-name", default="test.csv",
+                    help="manifest filename within manifest-dir, e.g. "
+                         "unseen_holdout.csv for the leave-k-attacks-out bench")
     ap.add_argument("--curated-root", default=str(CURATED_ROOT))
     ap.add_argument("--batch-size", type=int, default=8)
     args = ap.parse_args()
@@ -172,23 +221,25 @@ def main() -> None:
 
     # 멀티태스크 모델 + 통합 매니페스트(fake_label 컬럼 존재)면 두 헤드를 함께 채점.
     # 그 외(VoxForge 등 country 전용 매니페스트)는 기존 country-only 경로 유지.
-    test_csv = os.path.join(manifest_dir, "test.csv")
+    test_csv = os.path.join(manifest_dir, args.manifest_name)
     if getattr(model, "fake_head_enabled", False) and os.path.exists(test_csv):
         cols = pd.read_csv(test_csv, nrows=0).columns
         if "fake_label" in cols:
-            evaluate_multitask(model, MultiTaskCollator(fe), test_csv,
-                               args.batch_size, device, args.model_dir)
+            report_name = ("test_report_multitask.json" if args.manifest_name == "test.csv"
+                          else f"test_report_multitask_{Path(args.manifest_name).stem}.json")
+            evaluate_multitask(model, fe, test_csv,
+                               args.batch_size, device, args.model_dir, report_name)
             return
 
     collator = DataCollator(fe)
 
-    test_ds = AccentDataset(os.path.join(manifest_dir, "test.csv"),
+    test_ds = AccentDataset(os.path.join(manifest_dir, args.manifest_name),
                             curated_root=args.curated_root)
     loader = DataLoader(test_ds, batch_size=args.batch_size, collate_fn=collator)
-    print(f"test={len(test_ds)} clips on {device}")
+    print(f"test={len(test_ds)} clips on {device}", flush=True)
 
     all_preds, all_labels = [], []
-    for batch in loader:
+    for batch in tqdm(loader, mininterval=15):
         # labels는 모델 forward에 넘기지 않고 따로 빼서 나중에 비교용으로 사용.
         labels = batch.pop("labels")
         batch = {k: v.to(device) for k, v in batch.items()}

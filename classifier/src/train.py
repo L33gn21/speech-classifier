@@ -90,7 +90,8 @@ def compute_metrics(eval_pred):
     return metrics
 
 
-def detailed_report(preds: np.ndarray, labels: np.ndarray) -> dict:
+def detailed_report(preds: np.ndarray, labels: np.ndarray,
+                    label_names: list[str] | None = None) -> dict:
     """Per-class precision/recall/f1/support + confusion matrix for the model tester.
 
     ``compute_metrics`` only surfaces the scalars HF Trainer needs for model
@@ -104,12 +105,16 @@ def detailed_report(preds: np.ndarray, labels: np.ndarray) -> dict:
     # 혼동 행렬. compute_metrics 는 모델 선택에 필요한 스칼라만 내보내므로,
     # 여기서 원본 예측으로부터 나라별 상세치를 추가로 계산해 final_metrics.json 에
     # 중첩 키로 저장한다(프론트가 그대로 시각화).
-    ids = list(range(len(LABELS)))
+    #
+    # label_names: 기본은 country LABELS. 멀티태스크의 fake 헤드처럼 다른 라벨
+    # 집합에도 재사용할 수 있도록 노출한다(호출부는 그대로 둬도 되는 하위호환 기본값).
+    names = label_names if label_names is not None else LABELS
+    ids = list(range(len(names)))
     p, r, f1, support = precision_recall_fscore_support(
         labels, preds, labels=ids, zero_division=0
     )
     per_class = {
-        LABELS[i]: {
+        names[i]: {
             "precision": float(p[i]),
             "recall": float(r[i]),        # 대각선 재현율 = 그 나라 클립을 맞춘 비율
             "f1": float(f1[i]),
@@ -118,7 +123,7 @@ def detailed_report(preds: np.ndarray, labels: np.ndarray) -> dict:
         for i in ids
     }
     cm = confusion_matrix(labels, preds, labels=ids)
-    return {"labels": LABELS, "per_class": per_class, "confusion_matrix": cm.tolist()}
+    return {"labels": names, "per_class": per_class, "confusion_matrix": cm.tolist()}
 
 
 def compute_class_weights(train_df, scheme: str):
@@ -423,13 +428,38 @@ def run_multitask(args) -> None:
     )
 
     trainer.train()
-    val_metrics = trainer.predict(eval_ds, metric_key_prefix="eval").metrics
+    # predict() (evaluate() 대신) 를 써서 스칼라 지표와 "원본 예측"을 함께 얻는다 —
+    # country-only 경로와 동일하게, 나라별 상세치(모델 테스터용)를 여기서 계산하려면
+    # 원본 로짓/라벨이 필요하다.
+    val_out = trainer.predict(eval_ds, metric_key_prefix="eval")
+    val_metrics = val_out.metrics
     print("final val eval:", json.dumps(val_metrics, indent=2))
-    test_metrics = trainer.predict(test_ds, metric_key_prefix="test").metrics
+    test_out = trainer.predict(test_ds, metric_key_prefix="test")
+    test_metrics = test_out.metrics
     print("final test eval (held-out, speaker-disjoint; does NOT preserve "
           "ASVspoof's unseen-attack protocol boundary, see DATASET.md §11):",
           json.dumps(test_metrics, indent=2))
     metrics = {**val_metrics, **test_metrics}
+
+    def _country_detail(out) -> dict | None:
+        # out.predictions/out.label_ids 는 (country, fake) 튜플(compute_metrics_multitask
+        # 와 동일한 구조). ASVspoof 유래 행은 country_label=-100 이라 국가 지표에서 제외.
+        country_logits, country_labels = out.predictions[0], out.label_ids[0]
+        mask = country_labels != COUNTRY_IGNORE_INDEX
+        if not mask.any():
+            return None
+        return detailed_report(np.argmax(country_logits[mask], axis=-1), country_labels[mask])
+
+    # 모델 테스터가 country-only 잡과 같은 방식(accent별 F1 바·혼동행렬)으로 보여줄 수
+    # 있도록, 멀티태스크 잡도 country 헤드의 상세 리포트를 eval_detail/test_detail로 남긴다
+    # (이전까지는 country_accuracy/country_macro_f1 스칼라만 있어 accent별 분해가 안 됐음).
+    eval_detail = _country_detail(val_out)
+    test_detail = _country_detail(test_out)
+    if eval_detail is not None:
+        metrics["eval_detail"] = eval_detail
+    if test_detail is not None:
+        metrics["test_detail"] = test_detail
+
     metrics["train_config"] = {
         "multitask": True,
         "augment": bool(args.augment),
