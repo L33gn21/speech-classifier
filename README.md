@@ -27,7 +27,7 @@ both judgments from a single input clip.
 <!-- one-line team intro -->
 > (Write a one-sentence description of the team here.)
 
-| <img src="https://avatars.githubusercontent.com/u/182950917?s=64&v=4" width="200"/> | <img width="200" height="250" alt="image" src="https://github.com/user-attachments/assets/83dbf039-c6f6-4234-a480-34575a7be7cd" /> | <img src="https://avatars.githubusercontent.com/u/300678157?s=64&v=4" width="200"/> | <img src="https://avatars.githubusercontent.com/u/182950917?s=64&v=4" width="200"/> | <img src="https://avatars.githubusercontent.com/u/128562648?s=48&v=4" width="200"/> |
+| <img width="200" height="250" alt="image" src="https://github.com/user-attachments/assets/d6d025b0-ef7f-46f9-8ef4-9dd70876f5cf" /> | <img width="200" height="250" alt="image" src="https://github.com/user-attachments/assets/83dbf039-c6f6-4234-a480-34575a7be7cd" /> | <img src="https://avatars.githubusercontent.com/u/300678157?s=64&v=4" width="200"/> | <img src="https://avatars.githubusercontent.com/u/182950917?s=64&v=4" width="200"/> | <img src="https://avatars.githubusercontent.com/u/128562648?s=48&v=4" width="200"/> |
 |:---:|:---:|:---:|:---:|:---:|
 | **Jinwoong Lee** | **Hyunwoo Jung** | **Hyejin Park** | **Seongho Choi** | **Geonah Lee** |
 | Data Acquisition Lead | Data Systems | Presentation & Design | Engineering | Engineering |
