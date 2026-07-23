@@ -30,7 +30,7 @@ both judgments from a single input clip.
 |:---:|:---:|:---:|:---:|:---:|
 | **Jinwoong Lee** | **Hyunwoo Jung** | **Hyejin Park** | **Seongho Choi** | **Geonah Lee** |
 | Data Acquisition Lead | Data Systems | Presentation & Design | Engineering | Engineering |
-| [GitHub](https://github.com/) | [GitHub](https://github.com/) | [GitHub](https://github.com/) | [GitHub](https://github.com/) | [GitHub](https://github.com/) |
+| [GitHub](https://github.com/JINWOONG-JIM) | [GitHub](https://github.com/pzcm6435) | [GitHub](https://github.com/hzzin2) | [GitHub](https://github.com/ho849607) | [GitHub](https://github.com/L33gn21) |
 
 ### Role Breakdown
 
