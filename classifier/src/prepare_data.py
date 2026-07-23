@@ -1,15 +1,14 @@
 """Phase 1 — dataset collection from the curated GCS pool.
 
-Build balanced, speaker-disjoint train/val/test manifests directly from the
-per-country ``curated/<CC>/manifest.csv`` files described in DATASET.md.
+Build train/val/test manifests directly from the per-country
+``curated/<CC>/manifest.csv`` files described in DATASET.md §11.
 
-Recipe:
-  1. read each curated/<CC>/manifest.csv (columns: fname,source,speaker,gender,age,accent)
-  2. label = the folder name <CC> (US/UK/IN/NG/CA/JP/CN)
-  3. balanced under-sampling: at most TARGET_PER_CLASS clips per class
-     (small classes like CA/JP keep all their clips), speaker-aware so a
-     capped class keeps whole speakers rather than slicing one speaker in half
-  4. speaker-level split into train/val/test (no speaker in two splits)
+Each class is already fixed at exactly 5000 clips (AU/IN/CN padded up by
+duplicate-copy) with a precomputed, speaker-disjoint ``split`` column
+(train/val/test, ~70:15:15 -- see ``gcloud/pad_and_split_v2.py``). This module
+just reads that column; it does NOT recompute the split. `--per-class` still
+lets a run cap clips for quick experiments (speaker-aware, applied within
+each split so the 70:15:15 shape is preserved).
 
 Output columns (train/val/test): filename,label,country,speaker,source
 
@@ -19,15 +18,12 @@ FUSE-mounted GCS bucket on Vertex AI (see config.gcs_to_fuse).
 """
 # 1단계 — curated GCS 풀로부터 데이터셋 수집/전처리.
 #
-# DATASET.md 에 기술된 국가별 curated/<CC>/manifest.csv 파일들로부터
-# 클래스 균형이 맞고 화자(speaker)가 겹치지 않는 train/val/test 매니페스트를 만든다.
-#
-# 처리 순서:
-#   1. 각 curated/<CC>/manifest.csv 읽기 (컬럼: fname,source,speaker,gender,age,accent)
-#   2. 라벨 = 폴더 이름 <CC> (US/UK/IN/NG/CA/JP/CN)
-#   3. 클래스 균형 언더샘플링: 클래스당 최대 TARGET_PER_CLASS 개
-#      (CA/JP 처럼 작은 클래스는 전량 유지). 화자 단위로 뽑아 한 화자가 잘리지 않게 함.
-#   4. 화자 단위로 train/val/test 분할 (같은 화자가 두 분할에 동시에 등장하지 않음)
+# DATASET.md §11 에 기술된 국가별 curated/<CC>/manifest.csv 파일들을 읽는다.
+# 각 클래스는 이미 정확히 5000개로 고정돼 있고(AU/IN/CN 은 중복 복사로 패딩),
+# 화자 단위로 미리 계산된 split 컬럼(train/val/test, 약 70:15:15 —
+# gcloud/pad_and_split_v2.py 참고)을 그대로 읽기만 한다. 여기서 분할을 다시
+# 계산하지 않는다. --per-class 는 빠른 실험용으로 각 분할 내에서 화자 단위로
+# 클립 수를 제한하는 용도로만 남아 있다(70:15:15 비율은 유지됨).
 #
 # 원본 curated 풀은 절대 수정하지 않는다 — 매니페스트를 읽기만 하고,
 # 분할 결과만 MANIFEST_DIR 아래에 기록한다.
@@ -46,7 +42,6 @@ from config import (
     MANIFEST_DIR,
     MAX_CLIPS_PER_SPEAKER,
     SEED,
-    TARGET_PER_CLASS,
     TEST_FRACTION,
     VAL_FRACTION,
 )
@@ -55,7 +50,7 @@ from config import (
 def load_curated(curated_root: Path = CURATED_ROOT) -> pd.DataFrame:
     """Read every curated/<CC>/manifest.csv into one labelled dataframe.
 
-    Returns columns: filename, country, label, speaker, source.
+    Returns columns: filename, country, label, speaker, source, split.
     """
     # 각 국가 폴더의 manifest.csv 를 읽어 하나의 라벨링된 데이터프레임으로 합친다.
     frames = []
@@ -65,6 +60,10 @@ def load_curated(curated_root: Path = CURATED_ROOT) -> pd.DataFrame:
             print(f"  ! {cc}: manifest not found at {mpath} — skipping")
             continue
         m = pd.read_csv(mpath, dtype=str, keep_default_na=False)
+        if "split" not in m.columns:
+            raise ValueError(
+                f"{mpath} has no 'split' column — run gcloud/pad_and_split_v2.py "
+                "first (DATASET.md §11)")
         # speaker 컬럼이 비어 있는 행은 파일명을 화자 id 대용으로 사용(화자 단위 분할 안정성).
         speaker = m["speaker"].where(m["speaker"].astype(bool), other=cc + "_" + m["fname"])
         part = pd.DataFrame(
@@ -74,6 +73,7 @@ def load_curated(curated_root: Path = CURATED_ROOT) -> pd.DataFrame:
                 "label": LABEL2ID[cc],
                 "speaker": speaker,
                 "source": m.get("source", pd.Series([""] * len(m))),
+                "split": m["split"],
             }
         )
         frames.append(part)
@@ -138,62 +138,33 @@ def balanced_sample(
     return pd.concat(parts).reset_index(drop=True)
 
 
-def speaker_split(
-    df: pd.DataFrame,
-    val_fraction: float,
-    test_fraction: float,
-    rng: np.random.Generator,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Assign whole speakers to val/test per class (speaker-disjoint splits)."""
-    # 클래스별로 화자를 통째로 val/test 에 배정한다. 같은 화자의 목소리가
-    # 여러 분할에 동시에 나타나 모델이 억양이 아니라 목소리를 외우는
-    # 데이터 누수(leakage)를 막기 위함이다 (DATASET.md §5.2).
-    val_sp: set[str] = set()
-    test_sp: set[str] = set()
-    for cc in LABELS:
-        sub = df[df["country"] == cc]
-        # plain dict (not pandas scalar-label indexing) — see balanced_sample note.
-        sizes = sub.groupby("speaker").size().to_dict()
-        speakers = list(sizes.keys())
-        rng.shuffle(speakers)
-        n = len(sub)
-        val_target = int(round(n * val_fraction))
-        test_target = int(round(n * test_fraction))
-        acc = 0
-        i = 0
-        # 먼저 test 목표치를 채우고, 이어서 val 목표치를 채운다. 나머지는 train.
-        while i < len(speakers) and acc < test_target:
-            test_sp.add(speakers[i])
-            acc += sizes[speakers[i]]
-            i += 1
-        acc = 0
-        while i < len(speakers) and acc < val_target:
-            val_sp.add(speakers[i])
-            acc += sizes[speakers[i]]
-            i += 1
-    is_test = df["speaker"].isin(test_sp)
-    is_val = df["speaker"].isin(val_sp)
-    train = df[~is_test & ~is_val].reset_index(drop=True)
-    val = df[is_val].reset_index(drop=True)
-    test = df[is_test].reset_index(drop=True)
-    return train, val, test
-
-
 def build_splits(
     curated_root: Path = CURATED_ROOT,
-    per_class: int = TARGET_PER_CLASS,
+    per_class: int | None = None,
     val_fraction: float = VAL_FRACTION,
     test_fraction: float = TEST_FRACTION,
     seed: int = SEED,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """End-to-end: load curated pool -> balance -> speaker-disjoint 3-way split."""
-    # curated 로드 -> 클래스 균형 언더샘플링 -> 화자 단위 3분할 까지 한 번에 수행.
-    rng = np.random.default_rng(seed)
+    """Load curated pool, split by the precomputed ``split`` column.
+
+    ``per_class`` (optional) caps clips for a quick experiment, applied
+    speaker-aware WITHIN each split so the fixed 70:15:15 shape carries over
+    (target ~per_class*0.70/0.15/0.15 per split). Omit it to use every clip.
+    """
+    # curated 로드 -> 미리 계산된 split 컬럼으로 3분할. per_class 는 각 분할 내부에서
+    # 화자 단위로 클립 수를 줄이는 선택적 스모크테스트용 캡일 뿐, 분할 자체는 고정값을 그대로 쓴다.
     df = load_curated(curated_root)
     print(f"loaded {len(df)} clips across {df['country'].nunique()} classes")
-    df = balanced_sample(df, per_class, rng)
-    print(f"after balanced under-sampling (cap {per_class}/class): {len(df)} clips")
-    train, val, test = speaker_split(df, val_fraction, test_fraction, rng)
+    train = df[df["split"] == "train"].reset_index(drop=True)
+    val = df[df["split"] == "val"].reset_index(drop=True)
+    test = df[df["split"] == "test"].reset_index(drop=True)
+
+    if per_class:
+        rng = np.random.default_rng(seed)
+        train = balanced_sample(train, int(round(per_class * (1 - val_fraction - test_fraction))), rng)
+        val = balanced_sample(val, int(round(per_class * val_fraction)), rng)
+        test = balanced_sample(test, int(round(per_class * test_fraction)), rng)
+        print(f"capped to ~{per_class}/class: train={len(train)} val={len(val)} test={len(test)}")
 
     # sanity: no speaker in more than one split (no leakage)
     # 안전장치: 어떤 화자도 두 개 이상의 분할에 동시에 존재하지 않는지 최종 검증.
@@ -215,7 +186,9 @@ def report(name: str, df: pd.DataFrame) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--per-class", type=int, default=TARGET_PER_CLASS)
+    ap.add_argument("--per-class", type=int, default=None,
+                    help="optional speaker-aware cap for quick experiments; "
+                         "omit to use the full fixed 5000/class pool (DATASET.md §11)")
     ap.add_argument("--val-fraction", type=float, default=VAL_FRACTION)
     ap.add_argument("--test-fraction", type=float, default=TEST_FRACTION)
     ap.add_argument("--seed", type=int, default=SEED)

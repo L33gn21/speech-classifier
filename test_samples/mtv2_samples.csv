@@ -1,0 +1,13 @@
+file,true_label,true_country,pred_country,pred_country_prob,pred_fake,pred_fake_prob,source_uri
+real_us_glb_S_006951_009_1414.wav,real,US,US,0.664,real,0.995,gs://qi-ucsd-speech-usw2/curated/US/audio/glb_S_006951_009_1414.wav
+real_uk_glb_S_011631_063_339.wav,real,UK,UK,0.899,real,0.988,gs://qi-ucsd-speech-usw2/curated/UK/audio/glb_S_011631_063_339.wav
+real_ca_glb_S_017074_058_2815.wav,real,CA,CA,0.825,real,0.984,gs://qi-ucsd-speech-usw2/curated/CA/audio/glb_S_017074_058_2815.wav
+real_au_glb_S_005448_064_950.wav,real,AU,AU,0.940,real,0.987,gs://qi-ucsd-speech-usw2/curated/AU/audio/glb_S_005448_064_950.wav
+real_in_glb_S_008532_096_727.wav,real,IN,IN,0.949,real,0.986,gs://qi-ucsd-speech-usw2/curated/IN/audio/glb_S_008532_096_727.wav
+real_cn_saa_mandarin35_seg02.wav,real,CN,CN,0.978,real,0.986,gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k/audio_dup/dup00931_saa_mandarin35_seg02.wav
+fake_a01_asv_LA_T_2034961.wav,fake,NA,-,-,fake,1.000,gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k/audio_asv/asv_LA_T_2034961.wav
+fake_a02_asv_LA_T_7788802.wav,fake,NA,-,-,fake,1.000,gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k/audio_asv/asv_LA_T_7788802.wav
+fake_a03_asv_LA_T_3916065.wav,fake,NA,-,-,fake,1.000,gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k/audio_asv/asv_LA_T_3916065.wav
+fake_a17_asv_LA_E_7120726.wav,fake,NA,-,-,fake,1.000,gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k/audio_asv/asv_LA_E_7120726.wav
+fake_a18_asv_LA_E_7343077.wav,fake,NA,-,-,fake,1.000,gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k/audio_asv/asv_LA_E_7343077.wav
+fake_a19_asv_LA_E_6634764.wav,fake,NA,-,-,fake,1.000,gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k/audio_asv/asv_LA_E_6634764.wav

@@ -26,7 +26,7 @@ import numpy as np
 import torch
 from transformers import AutoFeatureExtractor
 
-from config import LABELS, OUTPUT_DIR, SAMPLE_RATE
+from config import FAKE_LABELS, LABELS, OUTPUT_DIR, SAMPLE_RATE
 from dataset import load_audio
 from model import AccentClassifier, load_from_dir
 
@@ -62,7 +62,7 @@ def load_trained(model_dir: Path) -> tuple[AccentClassifier, "AutoFeatureExtract
 @torch.no_grad()
 def predict(model, feature_extractor, audio_path: Path, want_frames: bool = False):
     # 단일 오디오 파일을 로드하여 전처리한 뒤 모델에 통과시키고,
-    # 발화 전체 확률(및 필요 시 프레임별 확률)을 반환한다.
+    # 발화 전체 확률(및 필요 시 프레임별 확률, fake 헤드가 있으면 real/fake 확률)을 반환.
     wav = load_audio(audio_path)
     inputs = feature_extractor(
         [wav], sampling_rate=SAMPLE_RATE, return_attention_mask=True, return_tensors="pt"
@@ -77,7 +77,11 @@ def predict(model, feature_extractor, audio_path: Path, want_frames: bool = Fals
     # 단순 평균이 아니므로). 그 경우 frame_probs 는 None 으로 둔다.
     if want_frames and out.frame_logits is not None:
         frame_probs = torch.softmax(out.frame_logits, dim=-1)[0].cpu().numpy()  # [T, C]
-    return probs, frame_probs
+    # real/fake 헤드가 있는 모델이면 이진 확률도 함께 반환(없으면 None).
+    fake_probs = None
+    if getattr(model, "fake_head_enabled", False) and out.fake_logits is not None:
+        fake_probs = torch.softmax(out.fake_logits, dim=-1)[0].cpu().numpy()  # [2]
+    return probs, frame_probs, fake_probs
 
 
 def main() -> None:
@@ -92,7 +96,18 @@ def main() -> None:
 
     model, fe, labels = load_trained(Path(args.model_dir))
     want_frames = args.frames or args.plot is not None
-    probs, frame_probs = predict(model, fe, Path(args.audio), want_frames)
+    probs, frame_probs, fake_probs = predict(model, fe, Path(args.audio), want_frames)
+
+    # real/fake 헤드가 있는 모델이면 먼저 위조 여부를 출력(가장 중요한 판정).
+    if fake_probs is not None:
+        fake_labels = FAKE_LABELS
+        cfg = Path(args.model_dir) / "label_config.json"
+        if cfg.exists():
+            fake_labels = json.loads(cfg.read_text()).get("fake_labels", FAKE_LABELS)
+        verdict = fake_labels[int(np.argmax(fake_probs))]
+        print(f"\nReal/Fake verdict for {args.audio}: {verdict.upper()}")
+        for i, name in enumerate(fake_labels):
+            print(f"  {name:10s} {fake_probs[i] * 100:5.1f}%")
 
     # 확률이 높은 순서대로 정렬해서 출력 (가장 가능성 높은 억양이 먼저 나옴).
     order = np.argsort(probs)[::-1]

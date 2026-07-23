@@ -17,7 +17,12 @@ Config is read from env vars so the same module works both as a local script
     DASHBOARD_USER    login user (shared with the dataset dashboard)
     DASHBOARD_PASS    login password
     DATASET_DASHBOARD_URL  optional link back to the dataset dashboard
+    API_KEY           static key other servers send via X-API-Key to hit /api/*
     PORT              listen port (Cloud Run injects this; default 8766)
+
+/api/* is a separate, machine-facing surface (X-API-Key header auth instead of
+the browser session login) — see api_key_required and the /api/models,
+/api/metrics/<job>, /api/predict routes near the bottom of this file.
 
 Usage:
     python serve_model_tester.py
@@ -49,7 +54,7 @@ from flask import Flask, jsonify, redirect, request, session, url_for
 from google.cloud import storage
 from transformers import AutoFeatureExtractor
 
-from config import LABELS, SAMPLE_RATE
+from config import FAKE_LABELS, LABELS, SAMPLE_RATE
 from model import AccentClassifier, load_from_dir
 
 app = Flask(__name__)
@@ -58,6 +63,10 @@ app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
 # 단일 사용자 로그인 정보. 데이터셋 대시보드와 동일한 기본값을 공유한다.
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "geonah")
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS", "dmdlsldk2!")
+
+# 다른 서버가 /api/* 를 호출할 때 쓰는 정적 API 키. 데모용 — 회전/스코프 없이
+# 헤더 값만 비교한다. 배포 시 deploy.sh 가 env var로 주입한다.
+API_KEY = os.environ.get("API_KEY", "dev-key-change-me")
 
 # 학습 job들이 쌓이는 GCS 접두어. 각 job은 <MODEL_ROOT>/<JOB_NAME>/model/ 아래에
 # model.safetensors / label_config.json / preprocessor_config.json / final_metrics.json 을 갖는다.
@@ -126,9 +135,14 @@ def list_models() -> list[dict]:
         if metrics_blob.exists():
             try:
                 m = json.loads(metrics_blob.download_as_bytes())
-                entry["test_accuracy"] = m.get("test_accuracy")
-                entry["eval_accuracy"] = m.get("eval_accuracy")
-                entry["macro_f1"] = m.get("test_macro_f1", m.get("eval_macro_f1"))
+                # 멀티태스크 잡은 "test_accuracy" 대신 "test_country_accuracy"/
+                # "test_fake_macro_f1" 키를 쓴다 — 둘 다 폴백으로 받아준다.
+                multitask = bool(m.get("train_config", {}).get("multitask")) or "test_fake_macro_f1" in m
+                entry["multitask"] = multitask
+                entry["test_accuracy"] = m.get("test_accuracy", m.get("test_country_accuracy"))
+                entry["eval_accuracy"] = m.get("eval_accuracy", m.get("eval_country_accuracy"))
+                entry["macro_f1"] = m.get("test_macro_f1", m.get("test_country_macro_f1"))
+                entry["fake_macro_f1"] = m.get("test_fake_macro_f1")
                 # 나라별 상세치를 볼 수 있는 모델인지 표시(드롭다운은 가볍게 유지하고,
                 # 상세 지표 자체는 선택 시 /metrics/<job> 로 따로 받는다).
                 entry["has_detail"] = ("test_detail" in m or "eval_detail" in m
@@ -159,12 +173,16 @@ def get_metrics(job: str) -> dict:
     if not blob.exists():
         return {"job": job, "metrics": None, "detail": None}
     m = json.loads(blob.download_as_bytes())
+    multitask = bool(m.get("train_config", {}).get("multitask")) or "test_fake_macro_f1" in m
 
     def summary(split: str) -> dict:
+        # 멀티태스크 잡은 country 지표가 "{split}_country_*" 키를 쓴다(§list_models).
         return {
-            "accuracy": m.get(f"{split}_accuracy"),
-            "macro_f1": m.get(f"{split}_macro_f1"),
+            "accuracy": m.get(f"{split}_accuracy", m.get(f"{split}_country_accuracy")),
+            "macro_f1": m.get(f"{split}_macro_f1", m.get(f"{split}_country_macro_f1")),
             "loss": m.get(f"{split}_loss"),
+            "fake_accuracy": m.get(f"{split}_fake_accuracy"),
+            "fake_macro_f1": m.get(f"{split}_fake_macro_f1"),
         }
 
     # 상세 블록: 신형은 그대로 사용, 구형은 f1 스칼라로 합성.
@@ -180,11 +198,26 @@ def get_metrics(job: str) -> dict:
                     "confusion_matrix": None,
                 }
                 break
+
+    # fake 헤드 클래스별(real/fake) F1 — 멀티태스크 잡만 갖는다.
+    fake_detail = None
+    for split in ("test", "eval"):
+        f1s = {k[len(f"{split}_fake_f1_"):]: v for k, v in m.items()
+               if k.startswith(f"{split}_fake_f1_")}
+        if f1s:
+            fake_detail = {
+                "labels": list(f1s.keys()),
+                "per_class": {name: {"f1": v} for name, v in f1s.items()},
+            }
+            break
+
     return {
         "job": job,
+        "multitask": multitask,
         "test": summary("test"),
         "eval": summary("eval"),
         "detail": detail,
+        "fake_detail": fake_detail,
     }
 
 
@@ -207,6 +240,9 @@ def _download_model_dir(job: str, dst: Path) -> None:
         "model.safetensors",
         "label_config.json",
         "preprocessor_config.json",
+        # model_config.json 이 없으면 load_from_dir 가 항상 레거시 기본 구조(country만,
+        # fake_head=False)로 골격을 짓는다 — 멀티태스크/attentive 모델은 이 파일이 필수.
+        "model_config.json",
     ]
     dst.mkdir(parents=True, exist_ok=True)
     for name in wanted:
@@ -226,13 +262,16 @@ def get_model(job: str):
         _download_model_dir(job, model_dir)
 
     labels = LABELS
+    fake_labels = FAKE_LABELS
     cfg = model_dir / "label_config.json"
     if cfg.exists():
-        labels = json.loads(cfg.read_text())["labels"]
+        cfg_data = json.loads(cfg.read_text())
+        labels = cfg_data["labels"]
+        fake_labels = cfg_data.get("fake_labels", FAKE_LABELS)
 
     # 백본은 config로만 짓고(HF 재다운로드 없음) 우리 safetensors로 덮어쓴다.
-    # load_from_dir 가 model_config.json 을 읽어 학습 때와 동일한 백본·헤드·
-    # 레이어가중 구조로 골격을 만든다(구버전 체크포인트는 레거시 기본값으로 폴백).
+    # load_from_dir 가 model_config.json 을 읽어 학습 때와 동일한 백본·헤드·fake_head
+    # 구조를 만든다(구버전 체크포인트는 레거시 기본값=country만 으로 폴백).
     model = load_from_dir(model_dir, num_labels=len(labels))
     from safetensors.torch import load_file
 
@@ -241,7 +280,7 @@ def get_model(job: str):
     model.eval()
 
     fe = AutoFeatureExtractor.from_pretrained(model_dir)
-    loaded = (model, fe, labels)
+    loaded = (model, fe, labels, fake_labels)
     with _model_lock:
         _models[job] = loaded
     return loaded
@@ -272,7 +311,7 @@ def decode_audio(raw: bytes) -> np.ndarray:
 
 @torch.no_grad()
 def run_inference(job: str, raw: bytes) -> dict:
-    model, fe, labels = get_model(job)
+    model, fe, labels, fake_labels = get_model(job)
     wav = decode_audio(raw)
     inputs = fe([wav], sampling_rate=SAMPLE_RATE, return_attention_mask=True, return_tensors="pt")
     device = next(model.parameters()).device
@@ -281,7 +320,22 @@ def run_inference(job: str, raw: bytes) -> dict:
     probs = torch.softmax(out.logits, dim=-1)[0].cpu().numpy()
     order = np.argsort(probs)[::-1]
     ranked = [{"label": labels[i], "prob": float(probs[i])} for i in order]
-    return {"duration_s": round(wav.size / SAMPLE_RATE, 2), "predictions": ranked}
+
+    fake_result = None
+    if getattr(model, "fake_head_enabled", False) and out.fake_logits is not None:
+        fake_probs = torch.softmax(out.fake_logits, dim=-1)[0].cpu().numpy()
+        verdict = fake_labels[int(np.argmax(fake_probs))]
+        fake_result = {
+            "verdict": verdict,
+            "probs": [{"label": fake_labels[i], "prob": float(fake_probs[i])}
+                      for i in range(len(fake_labels))],
+        }
+
+    return {
+        "duration_s": round(wav.size / SAMPLE_RATE, 2),
+        "predictions": ranked,
+        "fake": fake_result,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +349,48 @@ def login_required(view):
         return view(*args, **kwargs)
 
     return wrapped
+
+
+def api_key_required(view):
+    # 세션 로그인이 아니라 X-API-Key 헤더로 인증하는 머신용 라우트에 붙인다.
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        key = request.headers.get("X-API-Key", "")
+        if key != API_KEY:
+            return jsonify(ok=False, error="invalid or missing X-API-Key header"), 401
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+# /api/* 를 브라우저에서 직접 호출하는 외부 서비스(해커톤 프론트엔드)를 위한 CORS.
+# 세션 로그인 라우트는 same-origin만 쓰므로 대상 밖 — /api/* 에만 헤더를 붙인다.
+CORS_ALLOWED_ORIGINS = {
+    o.strip()
+    for o in os.environ.get(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:8000,https://jinwoong-team-hackertone2026-4nsi.onrender.com",
+    ).split(",")
+    if o.strip()
+}
+
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if request.path.startswith("/api/") and origin in CORS_ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Headers"] = "X-API-Key, Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+
+@app.route("/api/<path:_path>", methods=["OPTIONS"])
+def api_cors_preflight(_path):
+    # 프리플라이트는 API 키 없이 온다 — 인증 없이 204만 돌려주고 위 after_request가
+    # 헤더를 붙인다.
+    return "", 204
 
 
 LOGIN_PAGE = """<!doctype html>
@@ -438,9 +534,11 @@ async function loadModels() {{
     sel.innerHTML = '';
     data.models.forEach((m, i) => {{
       const opt = document.createElement('option');
-      const acc = (m.test_accuracy != null) ? ' — test acc ' + (m.test_accuracy*100).toFixed(1) + '%' : '';
+      const acc = (m.test_accuracy != null) ? ' — country acc ' + (m.test_accuracy*100).toFixed(1) + '%' : '';
+      const fake = (m.fake_macro_f1 != null) ? ' — fake F1 ' + (m.fake_macro_f1*100).toFixed(1) + '%' : '';
+      const tag = m.multitask ? ' [multitask]' : '';
       opt.value = m.job;
-      opt.textContent = m.job + acc + (i === 0 ? '  (latest)' : '');
+      opt.textContent = m.job + tag + acc + fake + (i === 0 ? '  (latest)' : '');
       sel.appendChild(opt);
     }});
     onModelChange();
@@ -488,7 +586,28 @@ function statCard(k, v) {{
 
 function renderMetrics(data) {{
   const t = data.test || {{}}, ev = data.eval || {{}}, det = data.detail;
-  let html = '<div class="cards">';
+  let html = '';
+
+  if (data.multitask) {{
+    html += '<div class="sec-title">Real/Fake detection (held-out, speaker-disjoint)</div>';
+    html += '<div class="cards">';
+    html += statCard('Fake acc', PCT(t.fake_accuracy));
+    html += statCard('Fake macro F1', PCT(t.fake_macro_f1));
+    html += '</div>';
+    const fdet = data.fake_detail;
+    if (fdet && fdet.per_class) {{
+      fdet.labels.forEach(l => {{
+        const pc = fdet.per_class[l] || {{}};
+        html += '<div class="pc-row"><div class="pc-name">' + l + '</div>' +
+                '<div class="pc-track"><div class="pc-fill" style="width:' +
+                  ((pc.f1 == null ? 0 : pc.f1 * 100).toFixed(1)) + '%"></div></div>' +
+                '<div class="pc-val">' + PCT(pc.f1) + '</div></div>';
+      }});
+    }}
+    html += '<div class="sec-title">Country (accent) head</div>';
+  }}
+
+  html += '<div class="cards">';
   html += statCard('Test acc', PCT(t.accuracy));
   html += statCard('Test macro F1', PCT(t.macro_f1));
   if (ev.accuracy != null) html += statCard('Val acc', PCT(ev.accuracy));
@@ -623,7 +742,24 @@ document.getElementById('run').onclick = async () => {{
 function renderResult(data) {{
   const box = document.getElementById('result');
   box.style.display = 'block';
-  let html = '<label>Prediction</label>';
+  let html = '';
+  if (data.fake) {{
+    const isFake = data.fake.verdict.toLowerCase() === 'fake';
+    const color = isFake ? '#c00' : '#16a34a';
+    html += '<div style="font-size:1.3rem;font-weight:700;color:' + color +
+            ';margin-bottom:0.6rem;">' + data.fake.verdict.toUpperCase() +
+            (isFake ? ' \\u26a0\\ufe0f (synthesized voice)' : ' \\u2713') + '</div>';
+    data.fake.probs.forEach(p => {{
+      const pct = (p.prob*100).toFixed(1);
+      html += '<div class="bar-wrap">' +
+                '<div class="bar-label"><span>' + p.label + '</span><span>' + pct + '%</span></div>' +
+                '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + color + ';"></div></div>' +
+              '</div>';
+    }});
+    html += '<label style="display:block;margin-top:0.8rem;">Accent prediction</label>';
+  }} else {{
+    html += '<label>Prediction</label>';
+  }}
   data.predictions.forEach((p, i) => {{
     const pct = (p.prob*100).toFixed(1);
     html += '<div class="bar-wrap' + (i===0?' top':'') + '">' +
@@ -682,6 +818,51 @@ def predict():
         return jsonify(ok=True, **result)
     except Exception as exc:
         return jsonify(ok=False, error=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Machine API  —  다른 서버가 X-API-Key 헤더로 호출하는 JSON 전용 엔드포인트.
+# 브라우저 세션 로그인과 무관 — 위 /models, /metrics, /predict 와 로직은 같고
+# 인증 방식만 다르다 (서버 간 호출은 폼 로그인을 할 수 없으므로 분리).
+# ---------------------------------------------------------------------------
+@app.get("/api/models")
+@api_key_required
+def api_models():
+    try:
+        return jsonify(ok=True, models=list_models())
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc))
+
+
+@app.get("/api/metrics/<path:job>")
+@api_key_required
+def api_metrics(job: str):
+    try:
+        return jsonify(ok=True, **get_metrics(job))
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc))
+
+
+@app.post("/api/predict")
+@api_key_required
+def api_predict():
+    # model 생략 시 가장 최신(list_models()가 최신순으로 반환) job을 쓴다 —
+    # 호출 서버가 job 이름을 몰라도 되게.
+    job = request.form.get("model")
+    if not job:
+        models = list_models()
+        if not models:
+            return jsonify(ok=False, error="no trained models found under MODEL_ROOT"), 503
+        job = models[0]["job"]
+    f = request.files.get("audio")
+    if f is None:
+        return jsonify(ok=False, error="no audio uploaded (multipart field 'audio')"), 400
+    try:
+        raw = f.read()
+        result = run_inference(job, raw)
+        return jsonify(ok=True, model=job, **result)
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc)), 500
 
 
 def main() -> None:
