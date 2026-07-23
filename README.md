@@ -26,20 +26,21 @@ both judgments from a single input clip.
 <!-- one-line team intro -->
 > (Write a one-sentence description of the team here.)
 
-| <img src="" width="120"/> | <img src="" width="120"/> | <img src="" width="120"/> | <img src="" width="120"/> |
-|:---:|:---:|:---:|:---:|
-| **Name** | **Name** | **Name** | **Name** |
-| Role | Role | Role | Role |
-| [GitHub](https://github.com/) | [GitHub](https://github.com/) | [GitHub](https://github.com/) | [GitHub](https://github.com/) |
+| <img src="" width="120"/> | <img src="" width="120"/> | <img src="" width="120"/> | <img src="" width="120"/> | <img src="" width="120"/> |
+|:---:|:---:|:---:|:---:|:---:|
+| **Jinwoong Lee** | **Hyunwoo Jung** | **Hyejin Park** | **Seongho Choi** | **Geonah Lee** |
+| Data Acquisition Lead | Data Systems | Presentation & Design | Engineering | Engineering |
+| [GitHub](https://github.com/) | [GitHub](https://github.com/) | [GitHub](https://github.com/) | [GitHub](https://github.com/) | [GitHub](https://github.com/) |
 
 ### Role Breakdown
 
-| Name | Responsibility |
-|------|-----------------|
-| (name) | (responsibility) |
-| (name) | (responsibility) |
-| (name) | (responsibility) |
-| (name) | (responsibility) |
+| Name | Major | Role |
+|------|-------|------|
+| Jinwoong Lee | Robotics Engineering | Data Acquisition Lead — sourced, curated, and validated the training corpora underpinning both the detection and accent models |
+| Hyunwoo Jung | Electronic Engineering | Data Systems — structured and maintained dataset documentation and technical records across the pipeline |
+| Hyejin Park | Climate Environmental Engineering | Presentation & Design — crafted the visual narrative and deck that brings the system's results to life |
+| Seongho Choi | Police Administration & Computer Science (Double Major) | Engineering — bridges investigative domain expertise with hands-on model and system development |
+| Geonah Lee | Computer Science | Engineering — architected and built the core detection and classification pipeline |
 
 ---
 
