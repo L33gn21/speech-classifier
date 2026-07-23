@@ -20,7 +20,8 @@ both judgments from a single input clip.
 
 <!-- team photo -->
 <p align="center">
-  <img src="" alt="team photo" width="600"/>
+  <img width="1100" height="570" alt="image" src="https://github.com/user-attachments/assets/45653394-7951-4388-a39a-0cbba3c2e9d8" />
+
 </p>
 
 <!-- one-line team intro -->
