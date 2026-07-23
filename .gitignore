@@ -14,9 +14,10 @@ env/
 
 # Generated outputs (outputs/classifier, outputs/detector, ...)
 /outputs/
-# classifier/reports/ holds human-written work reports (tracked). Only the
-# generated dataset audit HTML (inspect_dataset.py) is ignored:
-classifier/reports/*.html
+
+# Markdown docs (README/CLAUDE/DATASET/docs/reports/...): kept locally only,
+# not tracked in git history.
+*.md
 
 # Python cache
 __pycache__/
