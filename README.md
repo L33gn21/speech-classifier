@@ -27,8 +27,8 @@ VoxShield developed an AI service platform that detects, in real time, whether a
 
 | Human voice | AI-generated voice |
 |:---:|:---:|
-| <img src="Demo%20Images/input-human-AU.png" width="420" alt="Human audio input" /> | <img src="Demo%20Images/input-fake-2.png" width="420" alt="Synthetic audio input" /> |
-| <img src="Demo%20Images/result-human-AU.png" width="420" alt="REAL verdict with accent result" /> | <img src="Demo%20Images/result-fake-2.png" width="420" alt="SYNTHETIC verdict" /> |
+| <img src="Demo%20Images/input-test1-human-AU.png" width="420" alt="Human audio input" /> | <img src="Demo%20Images/input-fake-2.png" width="420" alt="Synthetic audio input" /> |
+| <img src="Demo%20Images/result-test1-human-AU.png" width="420" alt="REAL verdict with accent result" /> | <img src="Demo%20Images/result-fake-2.png" width="420" alt="SYNTHETIC verdict" /> |
 | Verified as human → language & accent stages run | Flagged as synthetic → accent stages skipped |
 
 ---
