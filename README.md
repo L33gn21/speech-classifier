@@ -26,7 +26,7 @@ VoxShield developed an AI service platform that detects, in real time, whether a
 ## Demo
 
 <p align="center">
-  <img src="Demo%20Images/input-human-US.png" width="420" alt="input human sound audio file" /> | <img src="Demo%Images/input-fake-2.png" width="420" alt="input synthetic audio file"
+  <img src="Demo%20Images/input-human-US.png" width="420" alt="input human sound audio file" /> | <img src="Demo%Images/input-fake-2.png" width="420" alt="input synthetic audio file" />
 </p>
 
 | Human voice | AI-generated voice |
