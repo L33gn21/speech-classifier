@@ -39,8 +39,9 @@ AI-synthesized voice (FAKE)**.
   phase (roadmap Level 3, separate initiative).
 - A Korean (KR) accent class is out of scope for this phase (data export
   restrictions require a separate track).
-- Real-time streaming inference is not a goal — the target is batch/single-shot
-  inference on uploaded clips.
+- Continuous streaming inference during a live call is out of scope for this phase.
+  The current target is single-shot inference on an uploaded clip, which returns a
+  result within seconds.
 - Speaker identification (who is speaking) is not addressed — only accent-region
   estimation and authenticity judgment are in scope.
 
