@@ -23,6 +23,19 @@ VoxShield developed an AI service platform that detects, in real time, whether a
 
 ---
 
+## Demo
+
+<p align="center">
+  <img src="Demo%20Images/result-human-IN.png" width="850" alt="Accent classification result with API response" />
+</p>
+
+| Human voice | AI-generated voice |
+|:---:|:---:|
+| <img src="Demo%20Images/result-human-US.png" width="420" alt="REAL verdict" /> | <img src="Demo%20Images/result-fake-2.png" width="420" alt="SYNTHETIC verdict" /> |
+| Verified as human → language & accent stages run | Flagged as synthetic → accent stages skipped |
+
+---
+
 ## Team
 
 <!-- team photo -->
