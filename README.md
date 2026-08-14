@@ -4,7 +4,7 @@
 
 A multitask model on a fine-tuned WavLM backbone produces both judgments — human vs. AI-generated, and accent profile — from a single audio clip.
 
-🔗 **[Try it live](https://language-detector-437352311046.us-west2.run.app/)**  |  🎬 **[Demo video]([(https://www.youtube.com/watch?v=HXz0Fad7RcQ))**
+🔗 **[Try it live](https://language-detector-437352311046.us-west2.run.app/)**  |  🎬 **[Demo video](https://www.youtube.com/watch?v=HXz0Fad7RcQ)**
 
 ---
 
