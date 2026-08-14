@@ -26,7 +26,7 @@ VoxShield developed an AI service platform that detects, in real time, whether a
 ## Demo
 
 <p align="center">
-  <img src="Demo%20Images/result-human-IN.png" width="850" alt="Accent classification result with API response" />
+  <img src="Demo%20Images/input-human-US.png" width="850" alt="Accent classification result with API response" />
 </p>
 
 | Human voice | AI-generated voice |
