@@ -136,6 +136,3 @@ Pretrained audio encoder (WavLM, fine-tuned)
 ## Docs
 
 - [PRD.md](./PRD.md) — Product Requirements Document
-- [classifier/README.md](./classifier/README.md) — classifier project usage guide
-- [classifier/DATASET.md](./classifier/DATASET.md) — dataset source of truth
-- [classifier/CLAUDE.md](./classifier/CLAUDE.md) — operating rules and current model status
