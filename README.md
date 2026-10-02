@@ -149,8 +149,10 @@ We would like to express our sincere gratitude to [Dr. Seokheon Cho](https://www
 
 We also acknowledge the following sources of research support:
 
-<!-- Grant numbers by team members' universities: Keimyung University = TBD, 2022-0-01067 = Jeonbuk National University, 2021-0-01393 = Kyonggi University -->
-This research was supported by the MSIT (Ministry of Science and ICT), Korea, under the National Program for Excellence in SW (Keimyung University: TBD, 2022-0-01067, 2021-0-01393), supervised by the IITP (Institute of Information & Communications Technology Planning & Evaluation).
+<!-- Grant numbers by team members' universities: 2026-RISE-03-002 = Keimyung University (Daegu RISE), 2022-0-01067 = Jeonbuk National University, 2021-0-01393 = Kyonggi University -->
+This research was supported by the Regional Innovation System & Education (RISE) program through the Daegu RISE Center, funded by the Ministry of Education (MOE) and Daegu Metropolitan City, Republic of Korea (2026-RISE-03-002).
+
+This research was also supported by the MSIT (Ministry of Science and ICT), Korea, under the National Program for Excellence in SW (2022-0-01067, 2021-0-01393), supervised by the IITP (Institute of Information & Communications Technology Planning & Evaluation).
 
 ---
 
