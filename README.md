@@ -20,6 +20,8 @@ VoxShield developed an AI service platform that detects, in real time, whether a
 - [Service Overview](#service-overview)
 - [Tech Stack](#tech-stack)
 - [Docs](#docs)
+- [Acknowledgments](#acknowledgments)
+- [Dataset, AI Model & References](#dataset-ai-model--references)
 
 ---
 
@@ -136,3 +138,103 @@ Pretrained audio encoder (WavLM, fine-tuned)
 ## Docs
 
 - [PRD.md](./PRD.md) — Product Requirements Document
+
+---
+
+## Acknowledgments
+
+This AI Service Platform was developed as part of the [17th QI AI Entrepreneurship Program – Summer 2026 (full content)](https://www.kaggle.com/code/QualcommInstituteAI/17th-qi-ai-entrepreneurship-program-summer-2026) & [(summary record)](https://github.com/Qualcomm-Institute-AI/QI-AI-Programs/tree/main/2026/Summer/17th%20QI%20AI%20Entrepreneurship%20Program), hosted by the Qualcomm Institute (QI), University of California, San Diego (UC San Diego).
+
+We would like to express our sincere gratitude to [Dr. Seokheon Cho](https://www.linkedin.com/in/justin-seokheon-cho-ph-d-91253343a/) of the Qualcomm Institute for his extensive guidance, supervision, and support throughout the development of this platform.
+
+We also acknowledge the following sources of research support:
+
+<!-- Grant numbers by team members' universities: Keimyung University = TBD, 2022-0-01067 = Jeonbuk National University, 2021-0-01393 = Kyonggi University -->
+This research was supported by the MSIT (Ministry of Science and ICT), Korea, under the National Program for Excellence in SW (Keimyung University: TBD, 2022-0-01067, 2021-0-01393), supervised by the IITP (Institute of Information & Communications Technology Planning & Evaluation).
+
+---
+
+## Dataset, AI Model & References
+
+### Dataset
+
+This project uses the following datasets and external data sources:
+
+**Training data of the deployed multitask model**
+
+* **[GLOBE](https://huggingface.co/datasets/MushanW/GLOBE)** — A high-quality English corpus with worldwide accents, built from Mozilla Common Voice through filtering and enhancement; it covers 23,519 speakers and 164 accents with per-speaker metadata. Used as the main volume source for the accent (country) classes. License: CC0 1.0. [Wang et al. (2024)]
+* **[Speech Accent Archive (SAA)](https://www.kaggle.com/datasets/rtatman/speech-accent-archive)** — Native and non-native English speakers from 177 countries, each reading the same English paragraph, collected at George Mason University. Used to add speaker diversity to every accent class (long paragraphs are split into short segments). License: CC BY-NC-SA 4.0. [Weinberger and Kunath (2011)]
+* **[ASVspoof 2019 LA](https://huggingface.co/datasets/Bisher/ASVspoof_2019_LA)** — The logical access (LA) partition of the ASVspoof 2019 challenge database: bona fide speech from the VCTK corpus and spoofed speech from 17 TTS and voice-conversion systems (attack IDs A01–A19). Used to train the real/fake head; the evaluation-split attacks (A07–A19) are held out as unseen attacks. Obtained through a Hugging Face mirror; the original release on [Edinburgh DataShare](https://doi.org/10.7488/ds/2555) is licensed under ODC-BY 1.0, and the underlying VCTK corpus under CC BY 4.0. [Wang et al. (2020), Todisco et al. (2019), Yamagishi et al. (2019a), Yamagishi et al. (2019b)]
+
+**Training data of earlier development iterations** (the final data rebuild uses GLOBE and SAA only for the accent classes)
+
+* **[Svarah](https://huggingface.co/datasets/ai4bharat/Svarah)** — Indian-accented English benchmark with 9.6 hours of read and spontaneous speech from 117 speakers across 65 locations in India. License: CC BY 4.0. [Javed et al. (2023)]
+* **[speechocean762](https://huggingface.co/datasets/mispeech/speechocean762)** — 5,000 English utterances from 250 non-native speakers whose first language is Mandarin, annotated for pronunciation assessment. License: Apache 2.0. [Zhang et al. (2021)]
+* **[AfriSpeech-200](https://huggingface.co/datasets/intronhealth/afrispeech-200)** — About 200 hours of Pan-African accented English speech covering 120 accents, for clinical and general-domain ASR. License: CC BY-NC-SA 4.0. [Olatunji et al. (2023)]
+* **[EdAcc](https://huggingface.co/datasets/edinburghcstr/edacc)** — The Edinburgh International Accents of English Corpus: about 40 hours of video-call conversations between speakers of many first languages. License: CC BY-SA 4.0. [Sanabria et al. (2023)]
+* **[CSTR VCTK Corpus](https://doi.org/10.7488/ds/2645)** — Read English speech from 110 speakers with various accents. License: CC BY 4.0. [Yamagishi et al. (2019b)]
+* **[Mozilla Common Voice](https://commonvoice.mozilla.org/)** — Crowdsourced read speech with self-reported accents. GLOBE is derived from it, and the `test_samples/*_common_voice_en_*.mp3` clips come from it. License: CC0 1.0. [Ardila et al. (2020)]
+
+**Evaluation only (held-out test sets, never used for training)**
+
+* **[VoxForge](https://www.voxforge.org/)** — Crowdsourced read English speech with speaker-reported dialects. Used as an unseen-corpus test set for the accent head and as an all-real benchmark for the false-fake rate of the real/fake head. License: GNU GPL.
+* **[L2-ARCTIC](https://psi.engr.tamu.edu/l2-arctic-corpus/)** — Non-native English speech from 24 speakers whose first languages are Hindi, Korean, Mandarin, Spanish, Arabic and Vietnamese. Used to build unseen held-out test sets for the IN, CN and KR classes. License: CC BY-NC 4.0. [Zhao et al. (2018)]
+* **[CMU ARCTIC](http://festvox.org/cmu_arctic/)** — About 1,150 phonetically balanced utterances per speaker, read by US English and other accented speakers. Used for the held-out US and CA test sets. License: free for any use, including commercial (CMU license). [Kominek and Black (2004)]
+* **[Free ST American English Corpus (OpenSLR 45)](https://www.openslr.org/45/)** — American English read speech from 10 speakers, released by Surfingtech. Used for the held-out US test set. License: CC BY-NC-ND 4.0.
+* **[UK and Ireland English Dialect Speech (OpenSLR 83)](https://www.openslr.org/83/)** — Crowdsourced recordings of UK and Ireland English dialects (the Irish subset was excluded). Used for the held-out UK test set. License: CC BY-SA 4.0. [Demirsahin et al. (2020)]
+* **[Nigerian English Speech (OpenSLR 70)](https://www.openslr.org/70/)** — Crowdsourced Nigerian English recorded in Lagos and London, released by Google. Used for a held-out NG test set in an earlier class configuration. License: CC BY-SA 4.0.
+
+> **License notes.** VoxShield is a non-commercial academic prototype. SAA, AfriSpeech-200, L2-ARCTIC and OpenSLR 45 carry non-commercial (NC) terms, so their licenses must be reviewed before any commercial use of the trained models. The audio clips in `test_samples/` are excerpts of GLOBE, SAA, ASVspoof 2019 LA and Common Voice and remain under their original licenses.
+
+### AI Model
+
+This project uses the following AI models for training, validation and test:
+
+* **[WavLM Base+](https://huggingface.co/microsoft/wavlm-base-plus)** — Ultimately selected as the backbone of the deployed multitask model: a self-supervised speech encoder fine-tuned end-to-end with an accent (country) head and a real/fake head. License: MIT. [Chen et al. (2022)]
+* **[wav2vec 2.0 Base](https://huggingface.co/facebook/wav2vec2-base)** — Backbone of the earlier accent-classifier versions; replaced by WavLM Base+ in the final model. License: Apache 2.0. [Baevski et al. (2020)]
+* **[SpeechBrain VoxLingua107 ECAPA-TDNN](https://huggingface.co/speechbrain/lang-id-voxlingua107-ecapa)** — Pretrained spoken-language identification model (107 languages) used in the web app's language stage, which runs only after a clip is verified as human. License: Apache 2.0; trained on VoxLingua107 (CC BY 4.0). [Ravanelli et al. (2021), Desplanques et al. (2020), Valk and Alumäe (2021)]
+* **[Spectra-AASIST](https://huggingface.co/lab260/Spectra-AASIST)** — Pretrained anti-spoofing model (wav2vec 2.0 XLS-R 300M encoder + AASIST classifier) used as the authenticity detector by the web app's optional Python inference worker. License: Apache 2.0. [Jung et al. (2022), Babu et al. (2022)]
+
+### References
+
+1. Wang, W., Song, Y., and Jha, S., "GLOBE: A High-quality English Corpus with Global Accents for Zero-shot Speaker Adaptive Text-to-Speech," in Proceedings of Interspeech 2024, pp. 1365–1369, 2024. [[DOI](https://doi.org/10.21437/Interspeech.2024-70)]
+
+2. Weinberger, S. H., and Kunath, S. A., "The Speech Accent Archive: Towards a Typology of English Accents," in Corpus-based Studies in Language Use, Language Learning, and Language Documentation, Brill, pp. 265–281, 2011. [[DOI](https://doi.org/10.1163/9789401206884_014)]
+
+3. Wang, X., Yamagishi, J., Todisco, M., Delgado, H., Nautsch, A., Evans, N., et al., "ASVspoof 2019: A Large-Scale Public Database of Synthesized, Converted and Replayed Speech," Computer Speech & Language, vol. 64, no. 101114, 2020. [[DOI](https://doi.org/10.1016/j.csl.2020.101114)]
+
+4. Todisco, M., Wang, X., Vestman, V., Sahidullah, M., Delgado, H., Nautsch, A., Yamagishi, J., Evans, N., Kinnunen, T., and Lee, K. A., "ASVspoof 2019: Future Horizons in Spoofed and Fake Audio Detection," in Proceedings of Interspeech 2019, pp. 1008–1012, 2019. [[DOI](https://doi.org/10.21437/Interspeech.2019-2249)]
+
+5. Yamagishi, J., Todisco, M., Sahidullah, M., Delgado, H., Wang, X., Evans, N., et al., "ASVspoof 2019: The 3rd Automatic Speaker Verification Spoofing and Countermeasures Challenge Database," University of Edinburgh, The Centre for Speech Technology Research (CSTR), 2019. (Yamagishi et al. (2019a)) [[DOI](https://doi.org/10.7488/ds/2555)]
+
+6. Yamagishi, J., Veaux, C., and MacDonald, K., "CSTR VCTK Corpus: English Multi-speaker Corpus for CSTR Voice Cloning Toolkit (version 0.92)," University of Edinburgh, The Centre for Speech Technology Research (CSTR), 2019. (Yamagishi et al. (2019b)) [[DOI](https://doi.org/10.7488/ds/2645)]
+
+7. Javed, T., Joshi, S., Nagarajan, V., Sundaresan, S., Nawale, J., Raman, A., Bhogale, K., Kumar, P., and Khapra, M. M., "Svarah: Evaluating English ASR Systems on Indian Accents," in Proceedings of Interspeech 2023, pp. 5087–5091, 2023. [[DOI](https://doi.org/10.21437/Interspeech.2023-2588)]
+
+8. Zhang, J., Zhang, Z., Wang, Y., Yan, Z., Song, Q., Huang, Y., Li, K., Povey, D., and Wang, Y., "speechocean762: An Open-Source Non-Native English Speech Corpus for Pronunciation Assessment," in Proceedings of Interspeech 2021, pp. 3710–3714, 2021. [[DOI](https://doi.org/10.21437/Interspeech.2021-1259)]
+
+9. Olatunji, T., Afonja, T., Yadavalli, A., Emezue, C. C., Singh, S., Dossou, B. F. P., et al., "AfriSpeech-200: Pan-African Accented Speech Dataset for Clinical and General Domain ASR," Transactions of the Association for Computational Linguistics, vol. 11, pp. 1669–1685, 2023. [[DOI](https://doi.org/10.1162/tacl_a_00627)]
+
+10. Sanabria, R., Bogoychev, N., Markl, N., Carmantini, A., Klejch, O., and Bell, P., "The Edinburgh International Accents of English Corpus: Towards the Democratization of English ASR," in Proceedings of the IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), pp. 1–5, 2023. [[DOI](https://doi.org/10.1109/ICASSP49357.2023.10095057)]
+
+11. Ardila, R., Branson, M., Davis, K., Kohler, M., Meyer, J., Henretty, M., Morais, R., Saunders, L., Tyers, F., and Weber, G., "Common Voice: A Massively-Multilingual Speech Corpus," in Proceedings of the 12th Language Resources and Evaluation Conference (LREC), pp. 4218–4222, 2020. [[Paper](https://aclanthology.org/2020.lrec-1.520/)]
+
+12. Zhao, G., Sonsaat, S., Silpachai, A., Lucic, I., Chukharev-Hudilainen, E., Levis, J., and Gutierrez-Osuna, R., "L2-ARCTIC: A Non-native English Speech Corpus," in Proceedings of Interspeech 2018, pp. 2783–2787, 2018. [[DOI](https://doi.org/10.21437/Interspeech.2018-1110)]
+
+13. Kominek, J., and Black, A. W., "The CMU Arctic Speech Databases," in Proceedings of the 5th ISCA Speech Synthesis Workshop (SSW5), pp. 223–224, 2004. [[Paper](https://www.isca-archive.org/ssw_2004/kominek04b_ssw.html)]
+
+14. Demirsahin, I., Kjartansson, O., Gutkin, A., and Rivera, C., "Open-source Multi-speaker Corpora of the English Accents in the British Isles," in Proceedings of the 12th Language Resources and Evaluation Conference (LREC), pp. 6532–6541, 2020. [[Paper](https://aclanthology.org/2020.lrec-1.804/)]
+
+15. Chen, S., Wang, C., Chen, Z., Wu, Y., Liu, S., Chen, Z., et al., "WavLM: Large-Scale Self-Supervised Pre-Training for Full Stack Speech Processing," IEEE Journal of Selected Topics in Signal Processing, vol. 16, no. 6, pp. 1505–1518, 2022. [[DOI](https://doi.org/10.1109/JSTSP.2022.3188113)]
+
+16. Baevski, A., Zhou, H., Mohamed, A., and Auli, M., "wav2vec 2.0: A Framework for Self-Supervised Learning of Speech Representations," in Advances in Neural Information Processing Systems (NeurIPS), vol. 33, pp. 12449–12460, 2020. [[DOI](https://doi.org/10.48550/arXiv.2006.11477)]
+
+17. Ravanelli, M., Parcollet, T., Plantinga, P., Rouhe, A., Cornell, S., Lugosch, L., et al., "SpeechBrain: A General-Purpose Speech Toolkit," arXiv preprint arXiv:2106.04624, 2021. [[DOI](https://doi.org/10.48550/arXiv.2106.04624)]
+
+18. Desplanques, B., Thienpondt, J., and Demuynck, K., "ECAPA-TDNN: Emphasized Channel Attention, Propagation and Aggregation in TDNN Based Speaker Verification," in Proceedings of Interspeech 2020, pp. 3830–3834, 2020. [[DOI](https://doi.org/10.21437/Interspeech.2020-2650)]
+
+19. Valk, J., and Alumäe, T., "VoxLingua107: A Dataset for Spoken Language Recognition," in Proceedings of the IEEE Spoken Language Technology Workshop (SLT), pp. 652–658, 2021. [[DOI](https://doi.org/10.1109/SLT48900.2021.9383459)]
+
+20. Jung, J.-w., Heo, H.-S., Tak, H., Shim, H.-j., Chung, J. S., Lee, B.-J., Yu, H.-J., and Evans, N., "AASIST: Audio Anti-Spoofing Using Integrated Spectro-Temporal Graph Attention Networks," in Proceedings of the IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), pp. 6367–6371, 2022. [[DOI](https://doi.org/10.1109/ICASSP43922.2022.9747766)]
+
+21. Babu, A., Wang, C., Tjandra, A., Lakhotia, K., Xu, Q., Goyal, N., et al., "XLS-R: Self-supervised Cross-lingual Speech Representation Learning at Scale," in Proceedings of Interspeech 2022, pp. 2278–2282, 2022. [[DOI](https://doi.org/10.21437/Interspeech.2022-143)]
