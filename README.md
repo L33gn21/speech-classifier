@@ -114,9 +114,10 @@ Pretrained audio encoder (WavLM, fine-tuned)
   are trained jointly on a shared encoder, keeping inference cost low.
 - **Frame-level evidence** — frame-level logits are preserved so a time-axis accent
   heatmap can be rendered (`infer.py --plot`).
-- **Domain randomization augmentation** — speed, band-limiting, reverb, and colored
-  noise augmentations simulate channel/recording differences, improving
-  generalization to unseen corpora.
+- **Optional domain randomization augmentation** — the training pipeline can apply
+  speed, band-limiting, reverb, and colored-noise augmentations to simulate
+  channel/recording differences (`train.py --augment --aug-strength`); the deployed
+  model was trained without augmentation.
 - **Reproducible training pipeline** — curation → split → train → evaluate → deploy
   is fully scripted, with a report written for every experiment
   (`classifier/reports/`).
@@ -164,7 +165,7 @@ This project uses the following datasets and external data sources:
 
 * **[GLOBE](https://huggingface.co/datasets/MushanW/GLOBE)** — A high-quality English corpus with worldwide accents, built from Mozilla Common Voice through filtering and enhancement; it covers 23,519 speakers and 164 accents with per-speaker metadata. Used as the main source of accent-labelled speech for the accent (country) head. License: CC0 1.0. [Wang et al. (2024)]
 * **[Speech Accent Archive (SAA)](https://www.kaggle.com/datasets/rtatman/speech-accent-archive)** — Native and non-native English speakers from 177 countries, each reading the same English paragraph, collected at George Mason University ([accent.gmu.edu](https://accent.gmu.edu)). Used to add speaker diversity to every accent class (long paragraphs are split into short segments). License: CC BY-NC-SA 4.0. [Weinberger (2013), Weinberger and Kunath (2011)]
-* **[ASVspoof 2019 LA](https://huggingface.co/datasets/Bisher/ASVspoof_2019_LA)** — The logical access (LA) partition of the ASVspoof 2019 challenge database: bona fide speech from the VCTK corpus and spoofed speech from 17 TTS and voice-conversion systems (attack IDs A01–A19). Used to train the real/fake head; the evaluation-split attacks (A07–A19) are held out as unseen attacks. Obtained through a Hugging Face mirror; the original release on [Edinburgh DataShare](https://doi.org/10.7488/ds/2555) is licensed under ODC-BY 1.0, and the underlying VCTK corpus under CC BY 4.0. [Wang et al. (2020), Todisco et al. (2019), Yamagishi et al. (2019a), Yamagishi et al. (2019b)]
+* **[ASVspoof 2019 LA](https://huggingface.co/datasets/Bisher/ASVspoof_2019_LA)** — The logical access (LA) partition of the ASVspoof 2019 challenge database: bona fide speech from the VCTK corpus and spoofed speech from 17 TTS and voice-conversion systems (attack IDs A01–A19). Used to train the real/fake head; the train/validation/test splits are speaker-disjoint. Obtained through a Hugging Face mirror; the original release on [Edinburgh DataShare](https://doi.org/10.7488/ds/2555) is licensed under ODC-BY 1.0, and the underlying VCTK corpus under CC BY 4.0. [Wang et al. (2020), Todisco et al. (2019), Yamagishi et al. (2019a), Yamagishi et al. (2019b)]
 
 ### AI Model
 
