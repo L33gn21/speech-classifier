@@ -1,0 +1,1 @@
+{"name":"Language Detector","description":"An application that recognizes speech in real time and identifies which language is being spoken.","requestFramePermissions":["microphone"],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}

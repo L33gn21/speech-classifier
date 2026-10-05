@@ -16,7 +16,7 @@ DATA_DIR = PROJECT_ROOT / "data" / "detector"        # expects real/ and fake/ s
 GEN_DIR = DATA_DIR / "generated_audio"
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "detector"
 
-# 미학습(hold-out) 보코더: fake/ 에는 들어있지 않고, 일반화 검증에만 쓴다.
+# Unseen (hold-out) vocoder: not included in fake/, used only to check generalization.
 HOLDOUT_VOCODER = "ljspeech_hifiGAN"
 
 SEED = 42
@@ -31,7 +31,7 @@ def list_dir(d, label):
 
 
 def group_split(files, test_size, seed):
-    """발화 ID 단위로 train/test 를 나눈다 (같은 ID 의 real/fake 는 같은 쪽으로)."""
+    """Split train/test by utterance ID (real/fake of the same ID go to the same side)."""
     ids = sorted({utt_id(p) for p, _ in files})
     train_ids, test_ids = train_test_split(ids, test_size=test_size, random_state=seed)
     train_ids, test_ids = set(train_ids), set(test_ids)
@@ -42,7 +42,7 @@ def group_split(files, test_size, seed):
 
 @torch.no_grad()
 def evaluate(model, loader, device):
-    """전체 정확도 + 클래스별 recall(real 을 real 로 / fake 를 fake 로) 반환."""
+    """Return overall accuracy + per-class recall (real as real / fake as fake)."""
     model.eval()
     correct = total = 0
     per_class_correct = {0: 0, 1: 0}
@@ -63,10 +63,10 @@ def evaluate(model, loader, device):
 
 
 def build_splits():
-    """발화 ID 단위 train/test split + hifiGAN hold-out 파일 리스트를 구성.
+    """Build the utterance-ID-level train/test split + the hifiGAN hold-out file list.
 
-    train.py(학습)와 eval_holdout.py(평가)가 동일한(seed 고정) split 을 공유하도록
-    한 곳에서 만든다. 반환: (train_files, test_files, holdout_files, train_ids, test_ids)
+    Built in one place so that train.py (training) and eval_holdout.py (evaluation) share the
+    same (fixed-seed) split. Returns: (train_files, test_files, holdout_files, train_ids, test_ids)
     """
     real_files = list_dir(DATA_DIR / "real", 0)
     fake_files = list_dir(DATA_DIR / "fake", 1)
@@ -74,8 +74,8 @@ def build_splits():
 
     train_files, test_files, train_ids, test_ids = group_split(all_files, TEST_SIZE, SEED)
 
-    # hifiGAN hold-out: test 쪽 발화 ID 의 real + 미학습 보코더(hifiGAN) fake.
-    # -> 미학습 보코더 & 미학습 발화 조합으로 가장 엄격하게 일반화를 측정.
+    # hifiGAN hold-out: real clips of the test-side utterance IDs + fakes from the unseen vocoder (hifiGAN).
+    # -> the strictest generalization measurement: unseen vocoder & unseen utterances combined.
     holdout_real = [(p, y) for p, y in test_files if y == 0]
     holdout_fake = [
         (os.path.join(GEN_DIR, HOLDOUT_VOCODER, f), 1)
@@ -92,10 +92,10 @@ def main():
 
     train_files, test_files, holdout_files, train_ids, test_ids = build_splits()
 
-    print(f"발화 ID: train={len(train_ids)} test={len(test_ids)}")
-    print(f"train 파일: {len(train_files)}  test(in-domain) 파일: {len(test_files)}")
+    print(f"utterance IDs: train={len(train_ids)} test={len(test_ids)}")
+    print(f"train files: {len(train_files)}  test (in-domain) files: {len(test_files)}")
     h_real = sum(1 for _, y in holdout_files if y == 0)
-    print(f"hifiGAN hold-out 파일: {len(holdout_files)} "
+    print(f"hifiGAN hold-out files: {len(holdout_files)} "
           f"(real={h_real} fake={len(holdout_files) - h_real})")
 
     train_ds = WaveFakeDataset.from_files(train_files)
@@ -140,16 +140,16 @@ def main():
         print(f"epoch {epoch:2d}  loss={loss_sum/len(train_loader):.4f}  "
               f"test acc={acc:.3f} (real={rr:.3f} fake={fr:.3f})")
 
-        # in-domain test 기준 best 를 저장.
+        # Save the best model by in-domain test accuracy.
         if acc >= best_acc:
             best_acc = acc
             torch.save(model.state_dict(), OUTPUT_DIR / "detector.pt")
 
-    # 학습 종료 후: 미학습 보코더(hifiGAN) 일반화 성능.
+    # After training: generalization to the unseen vocoder (hifiGAN).
     h_acc, h_rr, h_fr = evaluate(model, holdout_loader, device)
-    print("\n=== hifiGAN hold-out (미학습 보코더 일반화) ===")
+    print("\n=== hifiGAN hold-out (unseen-vocoder generalization) ===")
     print(f"acc={h_acc:.3f}  real recall={h_rr:.3f}  fake recall={h_fr:.3f}")
-    print(f"(best in-domain test acc={best_acc:.3f}, 저장: {OUTPUT_DIR / 'detector.pt'})")
+    print(f"(best in-domain test acc={best_acc:.3f}, saved: {OUTPUT_DIR / 'detector.pt'})")
 
 
 if __name__ == "__main__":

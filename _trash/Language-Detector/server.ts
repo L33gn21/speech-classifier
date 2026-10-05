@@ -67,7 +67,7 @@ async function startServer() {
                  }
                },
                {
-                 text: "Listen to this audio. Provide the transcription of what is being said, and identify the language (and country if applicable). Format the response as a JSON object with keys 'transcription' and 'language'. If no language can be identified or there is no speech, leave transcription as empty and language as '알 수 없음'. Write the language in Korean (e.g. '영어', '한국어', '스페인어')."
+                 text: "Listen to this audio. Provide the transcription of what is being said, and identify the language (and country if applicable). Format the response as a JSON object with keys 'transcription' and 'language'. If no language can be identified or there is no speech, leave transcription as empty and language as 'Unknown'. Write the language in English (e.g. 'English', 'Korean', 'Spanish')."
                }
              ]
           }

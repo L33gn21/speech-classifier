@@ -72,7 +72,7 @@ def print_status(data_dir: str = DEFAULT_DATA_DIR) -> None:
     ]
 
     print("=" * 70)
-    print("📁 데이터 폴더 상태")
+    print("📁 Data folder status")
     print(f"Data dir : {data_dir_path.resolve()}")
     print(f"Real dir : {real_dir.resolve()}")
     print(f"Fake dir : {fake_dir.resolve()}")
@@ -82,14 +82,14 @@ def print_status(data_dir: str = DEFAULT_DATA_DIR) -> None:
 
 
 def call_first_rows_api(api_url: str = HF_FIRST_ROWS_API) -> dict:
-    print("🌐 Hugging Face first-rows API 호출")
+    print("🌐 Calling the Hugging Face first-rows API")
     print(api_url)
 
     response = requests.get(api_url, timeout=60)
     print(f"HTTP status: {response.status_code}")
 
     if response.status_code != 200:
-        print("❌ API 호출 실패")
+        print("❌ API call failed")
         print(response.text[:2000])
         response.raise_for_status()
 
@@ -157,24 +157,24 @@ def inspect_api(api_url: str = HF_FIRST_ROWS_API) -> None:
     rows = data.get("rows", [])
 
     if not rows:
-        print("⚠️ rows가 비어 있습니다.")
+        print("⚠️ rows is empty.")
         return
 
     first_item = rows[0]
     row = first_item.get("row", first_item)
 
-    print("\n첫 번째 row의 key 목록:")
+    print("\nKeys of the first row:")
     for key in row.keys():
         print(f"- {key}")
 
-    print("\n첫 번째 row 미리보기:")
+    print("\nPreview of the first row:")
     print(json.dumps(row, indent=2, ensure_ascii=False)[:5000])
 
     candidates = find_audio_candidates(row)
 
-    print("\n찾은 audio 후보:")
+    print("\nAudio candidates found:")
     if not candidates:
-        print("- 없음")
+        print("- none")
     else:
         for i, c in enumerate(candidates[:5], start=1):
             print(f"{i}. url/src: {str(c.get('url'))[:200]}")
@@ -236,7 +236,7 @@ def save_data_url(data_url: str, out_path: Path) -> bool:
         return out_path.exists() and out_path.stat().st_size > 0
 
     except Exception as e:
-        print(f"❌ data URL 저장 실패: {e}")
+        print(f"❌ Failed to save the data URL: {e}")
         return False
 
 
@@ -267,7 +267,7 @@ def download_url_to_file(url: str, out_path: Path) -> bool:
         return out_path.exists() and out_path.stat().st_size > 0
 
     except Exception as e:
-        print(f"❌ 다운로드 실패: {e}")
+        print(f"❌ Download failed: {e}")
         return False
 
 
@@ -285,15 +285,15 @@ def download_fake_samples(
     rows = data.get("rows", [])
 
     if not rows:
-        print("❌ API rows가 비어 있어서 다운로드할 수 없습니다.")
+        print("❌ The API rows are empty, so nothing can be downloaded.")
         return
 
     saved = 0
     skipped = 0
 
-    print("\n⬇️ fake audio 다운로드 시작")
-    print(f"저장 위치: {out_dir_path.resolve()}")
-    print(f"최대 rows: {max_rows}")
+    print("\n⬇️ Starting the fake audio download")
+    print(f"Save location: {out_dir_path.resolve()}")
+    print(f"Max rows: {max_rows}")
 
     for item in rows[:max_rows]:
         row_idx = item.get("row_idx", saved)
@@ -302,7 +302,7 @@ def download_fake_samples(
         candidates = find_audio_candidates(row)
 
         if not candidates:
-            print(f"⚠️ row {row_idx}: audio 후보를 찾지 못했습니다.")
+            print(f"⚠️ row {row_idx}: no audio candidate found.")
             skipped += 1
             continue
 
@@ -315,21 +315,21 @@ def download_fake_samples(
         out_path = out_dir_path / filename
 
         if out_path.exists() and out_path.stat().st_size > 0:
-            print(f"✅ 이미 존재: {out_path}")
+            print(f"✅ Already exists: {out_path}")
             saved += 1
             continue
 
         ok = download_url_to_file(url, out_path)
 
         if ok:
-            print(f"✅ 저장 완료: {out_path}")
+            print(f"✅ Saved: {out_path}")
             saved += 1
         else:
-            print(f"❌ 저장 실패: row {row_idx}")
+            print(f"❌ Save failed: row {row_idx}")
             skipped += 1
 
     print("\n" + "=" * 70)
-    print("다운로드 결과")
+    print("Download result")
     print(f"saved  : {saved}")
     print(f"skipped: {skipped}")
     print("=" * 70)
@@ -342,19 +342,19 @@ def extract_features(file_path: str, sr: int = 16000):
         audio, sample_rate = librosa.load(file_path, sr=sr, mono=True)
 
         if audio is None or len(audio) == 0:
-            print(f"⚠️ 빈 오디오 파일: {file_path}")
+            print(f"⚠️ Empty audio file: {file_path}")
             return None
 
         duration = librosa.get_duration(y=audio, sr=sample_rate)
 
         if duration < 1.0:
-            print(f"⚠️ 너무 짧은 오디오: {file_path} ({duration:.2f}s)")
+            print(f"⚠️ Audio too short: {file_path} ({duration:.2f}s)")
             return None
 
         rms = float(np.mean(librosa.feature.rms(y=audio)))
 
         if rms < 0.001:
-            print(f"⚠️ 무음 또는 너무 작은 소리: {file_path}")
+            print(f"⚠️ Silent or too quiet: {file_path}")
             return None
 
         mfcc = librosa.feature.mfcc(y=audio, sr=sample_rate, n_mfcc=40)
@@ -379,7 +379,7 @@ def extract_features(file_path: str, sr: int = 16000):
         return features
 
     except Exception as e:
-        print(f"❌ 특징 추출 실패: {file_path}")
+        print(f"❌ Feature extraction failed: {file_path}")
         print(e)
         return None
 
@@ -413,14 +413,14 @@ def load_dataset(data_dir: str = DEFAULT_DATA_DIR):
     features = []
     labels = []
 
-    print("🚀 데이터 로딩 및 특징 추출 시작")
-    print(f"데이터 경로: {data_dir_path.resolve()}")
+    print("🚀 Loading data and extracting features")
+    print(f"Data path: {data_dir_path.resolve()}")
 
     for class_name, label in classes.items():
         folder = data_dir_path / class_name
         audio_files = collect_audio_files(folder)
 
-        print(f"\n📂 {class_name}: {len(audio_files)}개 파일 발견")
+        print(f"\n📂 {class_name}: found {len(audio_files)} files")
 
         for file_path in audio_files:
             feat = extract_features(str(file_path))
@@ -442,24 +442,24 @@ def train_model(
     X, y = load_dataset(data_dir)
 
     if X is None or y is None:
-        print("❌ 학습할 데이터가 없습니다.")
-        print("먼저 /content/data/real 과 /content/data/fake 폴더에 오디오 파일을 넣어주세요.")
+        print("❌ No data to train on.")
+        print("Put audio files into the /content/data/real and /content/data/fake folders first.")
         return
 
     real_count = int(np.sum(y == 0))
     fake_count = int(np.sum(y == 1))
 
     print("\n" + "=" * 70)
-    print("데이터 요약")
-    print(f"전체 샘플 수 : {len(y)}")
-    print(f"Real 샘플 수 : {real_count}")
-    print(f"Fake 샘플 수 : {fake_count}")
+    print("Data summary")
+    print(f"Total samples : {len(y)}")
+    print(f"Real samples : {real_count}")
+    print(f"Fake samples : {fake_count}")
     print("=" * 70)
 
     if real_count == 0 or fake_count == 0:
-        print("❌ real/fake 두 클래스가 모두 있어야 학습할 수 있습니다.")
-        print("현재 Hugging Face unfake/fake_voices API는 fake 샘플만 제공합니다.")
-        print("따라서 /content/data/real/ 폴더에 실제 사람 음성을 업로드해야 합니다.")
+        print("❌ Both the real and fake classes are required for training.")
+        print("The Hugging Face unfake/fake_voices API currently provides fake samples only.")
+        print("Real human speech therefore has to be uploaded to the /content/data/real/ folder.")
         return
 
     min_class_count = min(real_count, fake_count)
@@ -473,7 +473,7 @@ def train_model(
             stratify=y,
         )
     else:
-        print("⚠️ 데이터가 너무 적어서 전체 데이터로 학습/평가합니다.")
+        print("⚠️ Too little data, so training/evaluation uses the whole dataset.")
         X_train, X_test, y_train, y_test = X, X, y, y
 
     model = Pipeline([
@@ -485,16 +485,16 @@ def train_model(
         )),
     ])
 
-    print("\n🧠 모델 학습 시작...")
+    print("\n🧠 Starting model training...")
     model.fit(X_train, y_train)
 
     train_pred = model.predict(X_train)
     test_pred = model.predict(X_test)
 
-    print("\n🎯 학습 정확도")
+    print("\n🎯 Training accuracy")
     print(f"{accuracy_score(y_train, train_pred) * 100:.2f}%")
 
-    print("\n🧪 테스트 정확도")
+    print("\n🧪 Test accuracy")
     print(f"{accuracy_score(y_test, test_pred) * 100:.2f}%")
 
     print("\n📊 Classification Report")
@@ -511,8 +511,8 @@ def train_model(
     save_obj = {
         "model": model,
         "labels": {
-            0: "진짜 사람 음성 Real",
-            1: "AI 합성 음성 Fake",
+            0: "Real human voice (Real)",
+            1: "AI-synthesized voice (Fake)",
         },
         "feature_type": "mfcc_spectral_chroma",
     }
@@ -521,7 +521,7 @@ def train_model(
     model_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(save_obj, model_path)
 
-    print(f"\n💾 모델 저장 완료: {model_path}")
+    print(f"\n💾 Model saved: {model_path}")
 
 
 def predict_voice(
@@ -532,12 +532,12 @@ def predict_voice(
     model_path = Path(model_path)
 
     if not model_path.exists():
-        print("❌ 모델 파일이 없습니다.")
-        print("먼저 학습을 실행하세요.")
+        print("❌ Model file not found.")
+        print("Run training first.")
         return
 
     if not file_path.exists():
-        print(f"❌ 분석할 파일이 없습니다: {file_path}")
+        print(f"❌ File to analyze not found: {file_path}")
         return
 
     saved = joblib.load(model_path)
@@ -547,7 +547,7 @@ def predict_voice(
     feat = extract_features(str(file_path))
 
     if feat is None:
-        print("❌ 특징 추출 실패로 예측할 수 없습니다.")
+        print("❌ Cannot predict because feature extraction failed.")
         return
 
     feat = feat.reshape(1, -1)
@@ -567,18 +567,18 @@ def predict_voice(
         confidence_label = "Low / Uncertain"
 
     print("=" * 70)
-    print(f"🔍 분석 파일: {file_path}")
+    print(f"🔍 File analyzed: {file_path}")
     print("=" * 70)
-    print(f"🚨 결과: {labels[pred]}")
-    print(f"Real 확률: {real_prob:.1f}%")
-    print(f"Fake 확률: {fake_prob:.1f}%")
+    print(f"🚨 Result: {labels[pred]}")
+    print(f"Real probability: {real_prob:.1f}%")
+    print(f"Fake probability: {fake_prob:.1f}%")
     print(f"Confidence: {confidence_label}")
 
     if confidence < 60:
-        print("⚠️ 신뢰도가 낮습니다. 더 길고 깨끗한 음성을 사용해 주세요.")
+        print("⚠️ Low confidence. Please use longer, cleaner audio.")
 
     print("-" * 70)
-    print("주의: 이 결과는 확률적 추정이며 확정적 증거가 아닙니다.")
+    print("Note: this result is a probabilistic estimate, not conclusive evidence.")
     print("=" * 70)
 
 
@@ -658,7 +658,7 @@ real_dir.mkdir(parents=True, exist_ok=True)
 for filename in uploaded.keys():
     shutil.move(filename, real_dir / filename)
 
-print("업로드 완료")
+print("Upload complete")
 !python /content/voice_detector_hf_colab.py status
 !python /content/voice_detector_hf_colab.py train --data /content/data
 from google.colab import files
@@ -666,5 +666,5 @@ from google.colab import files
 uploaded = files.upload()
 test_file = list(uploaded.keys())[0]
 
-print("테스트 파일:", test_file)
+print("Test file:", test_file)
 !python /content/voice_detector_hf_colab.py predict "/content/{test_file}"

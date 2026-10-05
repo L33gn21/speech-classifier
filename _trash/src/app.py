@@ -1,24 +1,24 @@
-"""음성 파이프라인 통합 진입점 (detector -> classifier).
+"""Unified entry point of the speech pipeline (detector -> classifier).
 
-발화 하나를 받아 2단계 파이프라인을 돌린다.
-  1) detector : AI 합성(fake) vs 실제 사람(real) 판별
-  2) classifier: real 로 판정된 경우에만 영어 억양권 근접도(%) 추정
+Takes one utterance and runs a two-stage pipeline.
+  1) detector : decides AI-synthesized (fake) vs. real human (real)
+  2) classifier: estimates the proximity (%) to English accent regions, only when judged real
 
-detector 와 classifier 는 각자 `from model import ...` / `from config import ...`
-같은 플랫 import 를 쓰고, 두 디렉터리 모두 model.py/config.py/dataset.py 를 갖는다.
-그래서 두 패키지를 동시에 sys.path 에 올리면 이름이 충돌한다. 아래 `_import_context`
-컨텍스트 매니저로 한 번에 한 패키지만 import 경로에 노출시키고, 충돌하는 모듈
-캐시를 정리해 각 서브시스템을 독립적으로 로드한다.
+detector and classifier each use flat imports such as `from model import ...` /
+`from config import ...`, and both directories contain model.py/config.py/dataset.py.
+Putting both packages on sys.path at the same time therefore makes the names collide. The
+`_import_context` context manager below exposes only one package on the import path at a
+time and clears the colliding module cache, so each subsystem is loaded independently.
 
 Python API:
     from app import SpeechPipeline
     pipe = SpeechPipeline()
     print(pipe.analyze("clip.wav"))
 
-CLI (단일 파일 분석):
+CLI (single-file analysis):
     .venv/bin/python src/app.py path/to/clip.wav [--frames] [--json]
 
-웹 데모 (마이크/업로드 -> detector 판정 + classifier 억양 % + 프레임 히트맵):
+Web demo (microphone/upload -> detector verdict + classifier accent % + frame heatmap):
     .venv/bin/python src/app.py [--host 127.0.0.1] [--port 7860] [--share]
 """
 from __future__ import annotations
@@ -38,13 +38,13 @@ CLASSIFIER_DIR = PROJECT_ROOT / "src" / "classifier"
 DETECTOR_WEIGHTS = PROJECT_ROOT / "outputs" / "detector" / "detector.pt"
 CLASSIFIER_DIR_OUT = PROJECT_ROOT / "outputs" / "classifier"
 
-# 두 서브패키지가 공유하는 플랫 모듈 이름들 — import 전에 캐시에서 비운다.
+# Flat module names shared by the two subpackages — cleared from the cache before importing.
 _CONFLICTING_MODULES = ("config", "model", "dataset", "infer", "inference")
 
 
 @contextlib.contextmanager
 def _import_context(pkg_dir: Path):
-    """`pkg_dir` 만 sys.path 앞에 올리고 충돌 모듈 캐시를 정리한 상태로 import 하게 한다."""
+    """Import with only `pkg_dir` at the front of sys.path and the colliding module cache cleared."""
     saved_path = list(sys.path)
     saved_modules = {name: sys.modules.pop(name) for name in _CONFLICTING_MODULES if name in sys.modules}
     sys.path.insert(0, str(pkg_dir))
@@ -52,14 +52,14 @@ def _import_context(pkg_dir: Path):
         yield
     finally:
         sys.path[:] = saved_path
-        # 이번 컨텍스트에서 새로 로드된 플랫 모듈을 제거하고, 원래 있던 것은 복원.
+        # Remove the flat modules newly loaded in this context and restore the ones that existed before.
         for name in _CONFLICTING_MODULES:
             sys.modules.pop(name, None)
         sys.modules.update(saved_modules)
 
 
 class DetectorModel:
-    """1단계: log-mel + resnet18 로 real/fake 판별."""
+    """Stage 1: real/fake decision with log-mel + resnet18."""
 
     def __init__(self, weights: Path = DETECTOR_WEIGHTS, device: str | None = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -73,7 +73,7 @@ class DetectorModel:
 
     @staticmethod
     def _to_logmel(audio_path: Path) -> np.ndarray:
-        """inference.py 와 동일한 전처리: 16kHz -> 128-mel log, 128프레임 crop/pad, 표준화."""
+        """Same preprocessing as inference.py: 16 kHz -> 128-mel log, crop/pad to 128 frames, standardize."""
         import librosa
 
         audio, sr = librosa.load(str(audio_path), sr=16000)
@@ -102,7 +102,7 @@ class DetectorModel:
 
 
 class AccentModel:
-    """2단계: wav2vec2 backbone + linear head 로 억양 근접도 추정."""
+    """Stage 2: accent-proximity estimation with a wav2vec2 backbone + linear head."""
 
     def __init__(self, model_dir: Path = CLASSIFIER_DIR_OUT, device: str | None = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -111,7 +111,7 @@ class AccentModel:
 
             model, feature_extractor, labels = load_trained(Path(model_dir))
             model.to(self.device)
-            # 프레임 단위 예측(레벨 2)에 predict 함수를 그대로 재사용한다.
+            # Reuse the predict function as-is for frame-level prediction (Level 2).
             from infer import predict as _predict
 
         self.model = model
@@ -140,7 +140,7 @@ class AccentModel:
 
 
 class SpeechPipeline:
-    """detector -> classifier 전체 흐름을 묶는다. 모델은 첫 사용 시 lazy 로드."""
+    """Ties the whole detector -> classifier flow together. Models are lazy-loaded on first use."""
 
     def __init__(self, device: str | None = None):
         self.device = device
@@ -160,12 +160,12 @@ class SpeechPipeline:
         return self._accent
 
     def analyze(self, audio_path: str | Path, want_frames: bool = False) -> dict:
-        """전체 파이프라인. fake 면 억양 단계를 건너뛴다."""
+        """Full pipeline. The accent stage is skipped when the clip is fake."""
         det = self.detector.predict(audio_path)
         result = {"audio": str(audio_path), "detector": det}
         if det["is_fake"]:
             result["accent"] = None
-            result["message"] = "AI 합성 음성으로 판정 — 억양 분석을 건너뜁니다."
+            result["message"] = "Judged as AI-synthesized speech — skipping accent analysis."
         else:
             result["accent"] = self.accent.predict(audio_path, want_frames=want_frames)
         return result
@@ -180,7 +180,7 @@ def _format_human(result: dict) -> str:
     if result.get("accent") is None:
         lines.append(f"[classifier] skipped — {result.get('message', '')}")
     else:
-        lines.append("[classifier] 억양 근접도:")
+        lines.append("[classifier] accent proximity:")
         for item in result["accent"]["ranking"]:
             lines.append(f"    {item['accent']:10s} {item['percent']:5.1f}%")
     return "\n".join(lines)
@@ -202,10 +202,10 @@ def _run_cli(audio: str, want_frames: bool, want_json: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 웹 데모 (구 src/classifier/webui.py 를 대체 — detector + classifier 통합)
+# Web demo (replaces the old src/classifier/webui.py — detector + classifier combined)
 # ---------------------------------------------------------------------------
 
-# gr.Blocks 콜백에서 재사용할 파이프라인. 첫 요청 시 lazy 로드.
+# Pipeline reused by the gr.Blocks callbacks. Lazy-loaded on the first request.
 _PIPE: SpeechPipeline | None = None
 
 _PALETTE = ["#4c78a8", "#f58518", "#54a24b", "#e45756", "#72b7b2", "#b279a2"]
@@ -216,7 +216,7 @@ def _color(i: int) -> str:
 
 
 def _heatmap_figure(frame_probs: np.ndarray, labels: list[str]):
-    """시간축(약 20ms/프레임) 억양별 확률 라인 플롯."""
+    """Line plot of per-accent probability over time (about 20 ms per frame)."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -238,9 +238,9 @@ def _heatmap_figure(frame_probs: np.ndarray, labels: list[str]):
 
 
 def _classify(audio_path: str | None):
-    """Gradio 콜백. (detector 확률, classifier 확률, 요약 md, 히트맵) 반환."""
+    """Gradio callback. Returns (detector probabilities, classifier probabilities, summary md, heatmap)."""
     if not audio_path:
-        return {}, {}, "🎤 오디오를 녹음하거나 업로드해줘.", None
+        return {}, {}, "🎤 Record or upload some audio.", None
 
     result = _PIPE.analyze(audio_path, want_frames=True)
     det = result["detector"]
@@ -259,9 +259,9 @@ def _classify(audio_path: str | None):
     lines = [
         f"**[detector] REAL** (real {det['prob_real'] * 100:.1f}% / fake {det['prob_fake'] * 100:.1f}%)",
         "",
-        f"**추정 억양: `{accent['top']}` ({accent['ranking'][0]['percent']:.1f}%)**",
+        f"**Estimated accent: `{accent['top']}` ({accent['ranking'][0]['percent']:.1f}%)**",
         "",
-        "| 억양 | 근접도 |",
+        "| Accent | Proximity |",
         "|---|---|",
     ]
     for item in accent["ranking"]:
@@ -280,24 +280,24 @@ def _build_demo():
 
     with gr.Blocks(title="Speech Classifier") as demo:
         gr.Markdown(
-            "# 🗣️ 음성 판별 + 억양 분류 (2단계 파이프라인)\n"
-            "발화를 입력하면 **1) AI 합성(fake) vs 실제 사람(real)** 을 먼저 판별하고, "
-            "사람 음성으로 판정된 경우에만 **2) 영어 억양 근접도** 를 퍼센트로 보여줘.\n"
-            "아래에서 마이크로 녹음하거나 오디오 파일을 올리고 **분석** 버튼을 눌러."
+            "# 🗣️ Voice Authenticity + Accent Classification (two-stage pipeline)\n"
+            "Given an utterance, it first decides **1) AI-synthesized (fake) vs. real human (real)** and, "
+            "only when the voice is judged human, shows **2) English accent proximity** as percentages.\n"
+            "Record with the microphone or upload an audio file below, then press the **Analyze** button."
         )
         with gr.Row():
             with gr.Column(scale=1):
                 audio_in = gr.Audio(
                     sources=["microphone", "upload"],
                     type="filepath",
-                    label="발화 입력 (녹음 / 업로드)",
+                    label="Utterance input (record / upload)",
                 )
-                run_btn = gr.Button("분석", variant="primary")
+                run_btn = gr.Button("Analyze", variant="primary")
             with gr.Column(scale=1):
-                detector_out = gr.Label(label="[1단계] detector: real / fake", num_top_classes=2)
-                accent_out = gr.Label(label="[2단계] classifier: 억양 근접도", num_top_classes=4)
+                detector_out = gr.Label(label="[Stage 1] detector: real / fake", num_top_classes=2)
+                accent_out = gr.Label(label="[Stage 2] classifier: accent proximity", num_top_classes=4)
         summary_out = gr.Markdown()
-        heatmap_out = gr.Plot(label="시간축 억양 확률 (Level 2, real 판정 시에만)")
+        heatmap_out = gr.Plot(label="Accent probability over time (Level 2, only when judged real)")
 
         outputs = [detector_out, accent_out, summary_out, heatmap_out]
         run_btn.click(_classify, inputs=audio_in, outputs=outputs)
@@ -312,7 +312,7 @@ def _run_webui(host: str, port: int, share: bool) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"loading detector + classifier onto {device} ...")
     _PIPE = SpeechPipeline(device=device)
-    # 시작 시 미리 로드해서 첫 요청 지연을 없앤다.
+    # Preload at startup to remove the delay on the first request.
     _ = _PIPE.detector
     _ = _PIPE.accent
     print(f"labels: {_PIPE.accent.labels}")
@@ -324,13 +324,13 @@ def _run_webui(host: str, port: int, share: bool) -> None:
 def main() -> None:
     import argparse
 
-    ap = argparse.ArgumentParser(description="speech-classifier 통합 파이프라인 (CLI + 웹 데모)")
-    ap.add_argument("audio", nargs="?", default=None, help="지정 시 CLI 모드: 해당 오디오 파일만 분석")
-    ap.add_argument("--frames", action="store_true", help="프레임 단위 억양 확률도 계산(레벨 2, CLI 모드)")
-    ap.add_argument("--json", action="store_true", help="결과를 JSON 으로 출력(CLI 모드)")
-    ap.add_argument("--host", default="127.0.0.1", help="웹 데모 host (audio 미지정 시)")
-    ap.add_argument("--port", type=int, default=7860, help="웹 데모 port (audio 미지정 시)")
-    ap.add_argument("--share", action="store_true", help="공개 gradio.live 링크 생성 (웹 데모 모드)")
+    ap = argparse.ArgumentParser(description="speech-classifier unified pipeline (CLI + web demo)")
+    ap.add_argument("audio", nargs="?", default=None, help="if given, CLI mode: analyze only this audio file")
+    ap.add_argument("--frames", action="store_true", help="also compute frame-level accent probabilities (Level 2, CLI mode)")
+    ap.add_argument("--json", action="store_true", help="print the result as JSON (CLI mode)")
+    ap.add_argument("--host", default="127.0.0.1", help="web demo host (when audio is not given)")
+    ap.add_argument("--port", type=int, default=7860, help="web demo port (when audio is not given)")
+    ap.add_argument("--share", action="store_true", help="create a public gradio.live link (web demo mode)")
     args = ap.parse_args()
 
     if args.audio is not None:
