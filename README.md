@@ -191,7 +191,16 @@ This project uses the following AI models for training, validation and test:
 
 2. Weinberger, Steven. (2015). Speech Accent Archive. George Mason University. Retrieved from http://accent.gmu.edu [[Web](https://accent.gmu.edu)]
 
-3. Todisco, M., Wang, X., Vestman, V., Sahidullah, M., Delgado, H., Nautsch, A., Yamagishi, J., Evans, N., Kinnunen, T. H., and Lee, K. A., "ASVspoof 2019: Future Horizons in Spoofed and Fake Audio Detection," in Proceedings of Interspeech 2019, pp. 1008–1012, 2019. [[DOI](https://doi.org/10.21437/Interspeech.2019-2249)]
+3. Todisco et al. (2019) — ASVspoof 2019:
+
+   ```bibtex
+   @InProceedings{Todisco2019,
+     Title                    = {{ASV}spoof 2019: {F}uture {H}orizons in {S}poofed and {F}ake {A}udio {D}etection},
+     Author                   = {Todisco, Massimiliano and Wang, Xin and Sahidullah, Md and Delgado, H ́ector and Nautsch, Andreas and Yamagishi, Junichi and Evans, Nicholas and Kinnunen, Tomi and Lee, Kong Aik},
+     booktitle		   = {Proc. of Interspeech 2019},
+     Year                     = {2019}
+   }
+   ```
 
 4. Chen et al. (2021) — WavLM:
 
