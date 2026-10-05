@@ -171,7 +171,7 @@ This project uses the following datasets and external data sources:
 
 This project uses the following AI models for training, validation and test:
 
-* **[WavLM Base+](https://huggingface.co/microsoft/wavlm-base-plus)** — Backbone of the deployed multitask model: a self-supervised speech encoder fine-tuned with an accent (country) head and a real/fake head. License: CC BY-SA 3.0 per the official model card, which points to the [microsoft/UniSpeech license](https://github.com/microsoft/UniSpeech/blob/main/LICENSE); the WavLM source code in [microsoft/unilm](https://github.com/microsoft/unilm/tree/master/wavlm) is released under MIT. [Chen et al. (2022)]
+* **[WavLM Base+](https://huggingface.co/microsoft/wavlm-base-plus)** — Backbone of the deployed multitask model: a self-supervised speech encoder fine-tuned with an accent (country) head and a real/fake head. License: CC BY-SA 3.0 per the official model card, which points to the [microsoft/UniSpeech license](https://github.com/microsoft/UniSpeech/blob/main/LICENSE); the WavLM source code in [microsoft/unilm](https://github.com/microsoft/unilm/tree/master/wavlm) is released under MIT. [Chen et al. (2021)]
 
 > **License note.** VoxShield is a non-commercial academic prototype. SAA (CC BY-NC-SA 4.0) carries non-commercial and share-alike terms, and the WavLM Base+ checkpoint (CC BY-SA 3.0) carries share-alike terms, so both must be reviewed before any commercial use or redistribution of the trained model. The audio clips in `test_samples/` are excerpts of public speech corpora; they are not covered by this repository's CC BY-SA 4.0 license and remain under their original licenses — in particular, the SAA excerpt (`real_cn_saa_*.wav`, a resampled segment) stays under CC BY-NC-SA 4.0 and the ASVspoof 2019 LA excerpts (`fake_*_asv_*.wav`) under ODC-BY.
 
@@ -191,4 +191,15 @@ This project uses the following AI models for training, validation and test:
 
 7. Veaux, C., Yamagishi, J., and MacDonald, K., "CSTR VCTK Corpus: English Multi-speaker Corpus for CSTR Voice Cloning Toolkit," University of Edinburgh, The Centre for Speech Technology Research (CSTR), 2017. [[DOI](https://doi.org/10.7488/ds/1994)]
 
-8. Chen, S., Wang, C., Chen, Z., Wu, Y., Liu, S., Chen, Z., et al., "WavLM: Large-Scale Self-Supervised Pre-Training for Full Stack Speech Processing," IEEE Journal of Selected Topics in Signal Processing, vol. 16, no. 6, pp. 1505–1518, 2022. [[DOI](https://doi.org/10.1109/JSTSP.2022.3188113)]
+8. Chen et al. (2021) — WavLM, cited as its authors request in [microsoft/unilm](https://github.com/microsoft/unilm/tree/master/wavlm):
+
+   ```bibtex
+   @article{Chen2021WavLM,
+     title   = {WavLM: Large-Scale Self-Supervised  Pre-training   for Full Stack Speech Processing},
+     author  = {Sanyuan Chen and Chengyi Wang and Zhengyang Chen and Yu Wu and Shujie Liu and Zhuo Chen and Jinyu Li and Naoyuki Kanda and Takuya Yoshioka and Xiong Xiao and Jian Wu and Long Zhou and Shuo Ren and Yanmin Qian and Yao Qian and Jian Wu and Michael Zeng and Furu Wei},
+     eprint={2110.13900},
+     archivePrefix={arXiv},
+     primaryClass={cs.CL},
+     year={2021}
+   }
+   ```
