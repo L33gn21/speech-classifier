@@ -179,7 +179,7 @@ This project uses the following AI models for training, validation and test:
 
 1. Wang, W., Song, Y., and Jha, S., "GLOBE: A High-quality English Corpus with Global Accents for Zero-shot Speaker Adaptive Text-to-Speech," in Proceedings of Interspeech 2024, pp. 1365–1369, 2024. [[DOI](https://doi.org/10.21437/Interspeech.2024-70)]
 
-2. Weinberger, S., "Speech Accent Archive," George Mason University, 2015. Retrieved from http://accent.gmu.edu. [[Web](https://accent.gmu.edu)]
+2. Weinberger, Steven. (2015). Speech Accent Archive. George Mason University. Retrieved from http://accent.gmu.edu [[Web](https://accent.gmu.edu)]
 
 3. Weinberger, S. H., and Kunath, S. A., "The Speech Accent Archive: Towards a Typology of English Accents," in Corpus-based Studies in Language Use, Language Learning, and Language Documentation, Brill, pp. 265–281, 2011. [[DOI](https://doi.org/10.1163/9789401206884_014)]
 
