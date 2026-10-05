@@ -15,12 +15,6 @@
 # run at registration time. To actually serve, build a custom serving container
 # wrapping infer.py (/health + /predict) and register THAT (see docs).
 #
-# 학습 산출물(GCS)을 Vertex AI Model Registry에 "카탈로그/버전관리 목적으로만"
-# 등록한다. 버전 이력·계보·메타데이터가 GCS 아티팩트를 가리키게 된다.
-# 이 커스텀 wav2vec2 모델은 prebuilt 서빙 컨테이너로 배포 불가라서, 아래
-# 컨테이너 URI는 upload가 요구하는 "형식상 placeholder"일 뿐 등록 시 실행되지
-# 않는다. 실제 배포는 infer.py를 감싼 커스텀 서빙 컨테이너가 필요하다.
-#
 # Usage:
 #   ./register_model.sh <JOB_NAME>                 # registers gs://<BUCKET>/outputs/classifier/<JOB_NAME>/model
 #   ./register_model.sh gs://bucket/path/to/model  # or an explicit model dir

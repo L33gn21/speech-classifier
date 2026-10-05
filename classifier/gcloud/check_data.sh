@@ -7,11 +7,6 @@
 # nothing is uploaded from local. This script just sanity-checks that the classes
 # the model trains on (US/UK/IN/NG, see src/config.py LABELS) are there and prints
 # per-class clip counts before you build the image / submit a job.
-#
-# 데이터 업로드 단계는 없다. curated 풀은 VM->버킷으로 직접 만들어져
-# gs://<BUCKET>/curated/ 에 있고(CLAUDE.md §2, DATASET.md), train.py 가 잡 시작 시
-# 이 매니페스트들로부터 화자분리 train/val/test 분할을 직접 만든다. 이 스크립트는
-# 학습 대상 클래스(US/UK/IN/NG)가 버킷에 있는지 확인하고 클래스별 클립 수를 찍는다.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "${HERE}/env.sh"

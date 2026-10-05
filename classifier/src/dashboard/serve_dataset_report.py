@@ -19,27 +19,6 @@ Usage:
 Then open http://127.0.0.1:8765/ and click "Refresh" after the curated
 dataset changes.
 """
-# 데이터셋 대시보드를 "새로고침 버튼"이 있는 웹 서버로 띄우는 스크립트.
-#
-# inspect_dataset.py는 실행할 때마다 정적 HTML 파일을 새로 만드는 1회성
-# 스크립트였다. 이 스크립트는 그 로직(collect_manifests / render_body)을
-# 그대로 재사용하되, Flask로 감싸서 브라우저에서 버튼을 누를 때마다
-# GCS 매니페스트를 다시 읽고 화면을 그 자리에서 갱신한다.
-#
-# 설정은 환경변수로 읽는다 — 로컬 스크립트(`python serve_dataset_report.py`)로도,
-# Cloud Run 위의 gunicorn 앱(`gunicorn serve_dataset_report:app`, main()을
-# 호출하지 않음)으로도 동일한 모듈이 그대로 동작하게 하기 위함:
-#
-#     DATASET_ROOT     curated/ 루트, gs:// URI 또는 로컬 경로 (기본: 버킷)
-#     DATASET_CLASSES  콤마로 구분한 클래스 목록 (기본: US,UK,IN,NG,KR)
-#     PORT             리스닝 포트 (Cloud Run이 주입; 기본 8765)
-#
-# 사용 예시:
-#     python serve_dataset_report.py
-#     DATASET_ROOT=gs://qi-ucsd-speech-us/curated python serve_dataset_report.py
-#
-# 브라우저에서 http://127.0.0.1:8765/ 접속 후, 데이터셋이 바뀔 때마다
-# "Refresh" 버튼을 누르면 다시 읽어와 그려준다.
 from __future__ import annotations
 
 import datetime
@@ -62,7 +41,8 @@ from inspect_dataset import (
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
 
-# 단일 사용자 로그인 정보. 배포 시 DASHBOARD_USER / DASHBOARD_PASS 환경변수로 덮어쓸 수 있음.
+# Single-user login. Can be overridden at deploy time via the DASHBOARD_USER /
+# DASHBOARD_PASS environment variables.
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "geonah")
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS", "dmdlsldk2!")
 
@@ -129,11 +109,12 @@ def logout():
     session.clear()
     return redirect(url_for("login"))
 
-# 서버가 마지막으로 그린 리포트 상태. 여러 요청이 동시에 들어와도 안전하도록 _lock으로 보호.
+# State of the report the server rendered last. Protected by _lock so that concurrent
+# requests are safe.
 _state = {
     "root": os.environ.get("DATASET_ROOT", DEFAULT_ROOT),
     "classes": os.environ.get("DATASET_CLASSES", ",".join(DEFAULT_CLASSES)).split(","),
-    # fake(합성음성) 탐지용 spoof 코퍼스. SPOOF_ROOT=""로 비활성화 가능.
+    # Spoof corpus for fake (synthetic speech) detection. Can be disabled with SPOOF_ROOT="".
     "spoof_root": os.environ.get("SPOOF_ROOT", DEFAULT_SPOOF_ROOT) or None,
     "spoof_splits": os.environ.get("SPOOF_SPLITS", ",".join(SPOOF_SPLITS)).split(","),
     "body": "<p>Loading...</p>",
@@ -143,8 +124,8 @@ _lock = threading.Lock()
 
 
 def _regenerate() -> None:
-    # GCS에서 매니페스트를 다시 읽어 리포트 본문(body)을 새로 만든다.
-    # 실패해도 서버를 죽이지 않고 에러 메시지를 상태에 담아 화면에 보여준다.
+    # Re-read the manifests from GCS and rebuild the report body.
+    # On failure the server keeps running; the error message is stored in the state and shown.
     try:
         dfs = collect_manifests(_state["root"], _state["classes"])
         if not dfs:
@@ -245,8 +226,8 @@ def index():
 @app.post("/refresh")
 @login_required
 def refresh():
-    # 버튼 클릭 시 프론트에서 호출하는 엔드포인트. 매니페스트를 다시 읽고
-    # 새 body HTML을 JSON으로 돌려주면, 프론트가 innerHTML만 교체한다(페이지 새로고침 없음).
+    # Endpoint the frontend calls when the button is clicked. Re-reads the manifests and
+    # returns the new body HTML as JSON; the frontend only swaps innerHTML (no page reload).
     _regenerate()
     with _lock:
         if _state["error"]:
@@ -258,8 +239,8 @@ def refresh():
         )
 
 
-# 서버 기동 시 최초 1회 생성해둔다 (첫 화면부터 데이터가 보이도록). gunicorn은
-# main()을 부르지 않고 이 모듈을 import만 하므로, 모듈 레벨에서 실행해야 한다.
+# Generate once at server start (so the first screen already shows data). gunicorn only
+# imports this module and never calls main(), so this has to run at module level.
 _regenerate()
 
 

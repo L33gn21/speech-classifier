@@ -33,8 +33,8 @@ gcloud config set project "${PROJECT_ID}"
 # JOB_SUFFIX (optional env): appended to the job name so a sweep can label each
 # run, e.g. JOB_SUFFIX=lr5e5-uf4 ./submit_job.sh ...  ->  accent-classifier-<ts>-lr5e5-uf4
 JOB_NAME="accent-classifier-$(date +%Y%m%d-%H%M%S)${JOB_SUFFIX:+-${JOB_SUFFIX}}"
-# curated 풀(DATASET.md)을 데이터 소스로 사용. 컨테이너 안에서 train.py 가
-# 이 매니페스트들을 읽어 화자 단위 train/val/test 분할을 직접 만든다.
+# Use the curated pool (DATASET.md) as the data source. Inside the container, train.py
+# reads these manifests and builds the speaker-level train/val/test splits itself.
 CURATED_ROOT="gs://${BUCKET}/curated"
 OUTPUT_BASE="gs://${BUCKET}/outputs/classifier/${JOB_NAME}"
 
@@ -51,8 +51,6 @@ done
 
 # Accelerator is optional: set ACCELERATOR_TYPE=none (or empty) in env.sh to run
 # on CPU only (no Vertex GPU quota needed). Otherwise the T4/L4 block is added.
-# 가속기는 선택 사항이다. env.sh 에서 ACCELERATOR_TYPE=none(또는 빈 값)으로
-# 두면 GPU 쿼터 없이 CPU만으로 실행한다. 그 외에는 T4/L4 블록이 추가된다.
 ACCEL_YAML=""
 if [ -n "${ACCELERATOR_TYPE:-}" ] && [ "${ACCELERATOR_TYPE}" != "none" ]; then
   ACCEL_YAML="      acceleratorType: ${ACCELERATOR_TYPE}"$'\n'"      acceleratorCount: ${ACCELERATOR_COUNT}"$'\n'

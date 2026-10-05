@@ -53,13 +53,6 @@ same tradeoff already accepted for country-real speaker reuse across systems.
 Real rows are untouched (kept on the precomputed column) since bonafide isn't
 attack-bound.
 """
-# 1단계(멀티태스크) — 국가 + real/fake 통합 스플릿 매니페스트 생성.
-# v2 데이터셋 재구축(rebuild_dataset_v2_vm.py, DATASET.md §11)이 만든 평탄한
-# real/fake 풀(curated_spoof/real_fake_5k/manifest.csv)을 읽는다. 이 풀은
-# 이미 real:fake=35000:35000 로 균형이 맞춰져 있고, 화자 단위로 미리 계산된
-# split 컬럼(train/val/test, 약 70:15:15 — gcloud/pad_and_split_v2.py)도 이미
-# 갖고 있다. 여기서 분할을 다시 계산하지 않고 그 컬럼을 그대로 읽는다.
-# audio_uri 가 이미 완전한 gs:// 경로이므로 root+subdir 조합이 필요 없다.
 from __future__ import annotations
 
 import argparse

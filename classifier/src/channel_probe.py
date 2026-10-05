@@ -42,30 +42,6 @@ Example (Vertex CPU custom job): ``gcloud/submit_probe_job.sh --per-class=1500``
 Local:                           ``python channel_probe.py --per-class=300``
 Self-test (no audio needed):     ``python channel_probe.py --selftest``
 """
-# 채널 누수 프로브 (DATASET.md §5.1).
-#
-# 묻는 것: 분류기의 성능 중 얼마가 "억양"이 아니라 "녹음 채널/코퍼스 지문"에서
-# 나오는가? 6개 중 5개 클래스가 GLOBE(깨끗한 24kHz FLAC) 우세이고 GLOBE 안에서도
-# 억양별로 녹음 집단(마이크)이 다르므로, 모델이 억양이 아니라 "코퍼스/마이크를
-# 읽어" 점수를 낼 수 있다. 이 confound 가 v3 가 미지 코퍼스(VoxForge)에서 CA→US
-# 로 붕괴한 유력 원인이라, 이를 직접 측정한다.
-#
-# 방법(§5.1): 채널/마이크/코덱 정보는 담되 음소(발음) 내용은 거의 없는 "저수준
-# 음향 특징"으로, 실제 모델과 "동일한 화자분리 분할"에서 단순 선형 프로브(로지스틱
-# 회귀)를 학습한다. 이 특징만으로 6개국이 우연 이상으로 갈리면 채널이 새는 것이다.
-#   - lowlevel: 장기평균스펙트럼 + 스펙트럼형태 통계 + 고역대 에너지비 + 노이즈 플로어.
-#   - silence : 가장 조용한 프레임들의 로그-멜 스펙트럼만. 침묵은 억양을 담을 수
-#               없으므로, 이것이 클래스를 가르면 "명백한" 채널 누수다(가장 깨끗한 격리).
-#   - US↔CA 이진 프로브: 회귀가 난 바로 그 쌍. 저수준 특징이 US/CA 를 50% 훨씬
-#               넘게 가르면 붕괴에 채널 원인이 있는 것.
-#   - GLOBE↔SAA 소스 프로브: 양성 대조군. 코덱/샘플레이트가 다르니 특징이 이를
-#               거의 완벽히 갈라야 정상 — 못 가르면 특징이 약한 것이라 국가 수치도 무의미.
-#
-# 화자분리는 의도적/보수적이다: 한 화자의 마이크 암기를 금지하므로 남는 분리력은
-# "클래스 단위" 채널 편향 — 미지 코퍼스로 전이 안 되는 바로 그 confound 다.
-#
-# CPU 전용(librosa + scikit-learn; torch/GPU 불필요). config.CURATED_ROOT 에서
-# 오디오를 읽고 config.OUTPUT_DIR(Vertex 에선 AIP_MODEL_DIR→버킷)에 JSON 판정을 쓴다.
 from __future__ import annotations
 
 import argparse
@@ -89,29 +65,29 @@ from prepare_data import build_splits, report
 
 # ---------------------------------------------------------------------------
 # Low-level feature extraction (channel-dominant, phonetics-agnostic)
-# 저수준 특징 추출 (채널 우세, 음소 비의존)
 # ---------------------------------------------------------------------------
-# STFT/멜 파라미터: 25ms 창 / 10ms 홉 / 40 멜밴드 (음성 표준). 특징은 프레임 축으로
-# 통계를 내(mean/std/percentile) 발화 내용(음소 시퀀스)은 평균으로 씻겨나가고
-# 녹음 채널의 주파수 응답·대역폭·노이즈 특성만 남게 만든다.
+# STFT/mel parameters: 25 ms window / 10 ms hop / 40 mel bands (speech standard). The
+# features are statistics over the frame axis (mean/std/percentile), so the utterance
+# content (phoneme sequence) averages out and only the recording channel's frequency
+# response, bandwidth and noise characteristics remain.
 _N_FFT = 400
 _HOP = 160
 _N_MELS = 40
-_HF_BANDS = 8       # 상위 멜밴드 수(코덱 저역통과/대역폭 tell)
-_SILENCE_PCTL = 15  # 이 백분위 이하 에너지 프레임을 "침묵"으로 간주
+_HF_BANDS = 8       # number of top mel bands (codec low-pass / bandwidth tell)
+_SILENCE_PCTL = 15  # frames at or below this energy percentile count as "silence"
 
-# 각 특징 그룹의 차원 (matrix 조립·자기검증에 사용).
+# Dimension of each feature group (used for matrix assembly and the self-test).
 _GROUP_DIMS = {
-    "ltas": 2 * _N_MELS,   # 장기평균 로그멜 mean+std
-    "shape": 12,           # centroid/bw/rolloff/flatness/zcr/rms 의 mean+std
-    "hf": 1,               # 고역대 에너지비 평균
-    "floor": 2,            # 프레임 에너지(dB) 5·10 백분위 = 노이즈 플로어
-    "silence": _N_MELS + 1,  # 침묵 프레임 로그멜 평균 + 침묵 레벨(dB)
+    "ltas": 2 * _N_MELS,   # long-term average log-mel mean+std
+    "shape": 12,           # mean+std of centroid/bw/rolloff/flatness/zcr/rms
+    "hf": 1,               # mean high-band energy ratio
+    "floor": 2,            # 5th/10th percentile of frame energy (dB) = noise floor
+    "silence": _N_MELS + 1,  # mean log-mel of silent frames + silence level (dB)
 }
-# 프로브별로 어떤 그룹을 쓰는지.
+# Which groups each probe uses.
 PROBE_FEATURES = {
-    "lowlevel": ["ltas", "shape", "hf", "floor"],  # 일반 저수준(약간의 억양 가능)
-    "silence": ["silence"],                         # 엄격: 억양 불가능
+    "lowlevel": ["ltas", "shape", "hf", "floor"],  # general low-level (some accent information possible)
+    "silence": ["silence"],                         # strict: cannot carry accent
 }
 
 
@@ -122,8 +98,6 @@ def _load_audio(path: Path, max_seconds: float) -> np.ndarray | None:
     both GLOBE FLAC and SAA mp3 via soundfile / audioread(ffmpeg). Returns None
     on decode failure (the clip is skipped, not fatal).
     """
-    # torch 없이 librosa 로만 로드해 프로브를 가벼운 CPU 잡으로 유지한다.
-    # FLAC(GLOBE)·mp3(SAA) 모두 처리. 디코드 실패 시 None(해당 클립만 건너뜀).
     import librosa
 
     try:
@@ -146,13 +120,11 @@ def featurize(wav: np.ndarray) -> dict[str, np.ndarray]:
     frame-statistics (mean/std/percentile over time) so the phoneme *sequence*
     averages out and what remains is the recording's channel signature.
     """
-    # 파형에서 채널 우세 저수준 특징을 그룹별로 계산해 반환한다. 모든 그룹은
-    # 시간축 통계라 음소 시퀀스는 씻겨나가고 녹음 채널 특성만 남는다.
     import librosa
 
-    # STFT 크기 스펙트럼(D)을 한 번 계산해 형태 통계에 재사용하고, 그 파워로부터
-    # 멜 스펙트럼을 만든다. spectral_flatness/rms 는 멜이 아니라 STFT 크기(선형
-    # 주파수 bin)를 요구하므로 D 를 넘겨야 한다.
+    # Compute the STFT magnitude spectrum (D) once and reuse it for the shape statistics;
+    # the mel spectrum is built from its power. spectral_flatness/rms need the STFT
+    # magnitude (linear frequency bins), not mel, so D has to be passed in.
     D = np.abs(librosa.stft(wav, n_fft=_N_FFT, hop_length=_HOP))    # [1+n_fft/2, T]
     D = np.maximum(D, 1e-10)
     S = librosa.feature.melspectrogram(
@@ -162,11 +134,11 @@ def featurize(wav: np.ndarray) -> dict[str, np.ndarray]:
     frame_pow = (D ** 2).sum(axis=0)               # [T] per-frame energy
     frame_db = librosa.power_to_db(np.maximum(frame_pow, 1e-10))  # [T]
 
-    # -- LTAS: 장기평균 로그멜 스펙트럼(mean)+변동(std). 마이크 주파수응답·코덱
-    #    저역통과가 지배(음소는 평균으로 상쇄). --
+    # -- LTAS: long-term average log-mel spectrum (mean) + variation (std). Dominated by the
+    #    microphone frequency response and the codec low-pass (phonemes cancel out). --
     ltas = np.concatenate([logS.mean(axis=1), logS.std(axis=1)])   # [2*n_mels]
 
-    # -- 스펙트럼 형태 통계: 대역폭/코덱 tell. 각 프레임 스칼라의 mean+std. --
+    # -- Spectral-shape statistics: bandwidth/codec tell. mean+std of each per-frame scalar. --
     def _ms(x):
         x = np.asarray(x, dtype=np.float64).ravel()
         return [float(np.mean(x)), float(np.std(x))]
@@ -180,23 +152,23 @@ def featurize(wav: np.ndarray) -> dict[str, np.ndarray]:
     shape = np.array(_ms(cent) + _ms(bw) + _ms(roll) + _ms(flat)
                      + _ms(zcr) + _ms(rms), dtype=np.float32)      # [12]
 
-    # -- 고역대 에너지비: 상위 멜밴드/전체. mp3 저역통과 vs FLAC 광대역 tell. --
+    # -- High-band energy ratio: top mel bands / total. mp3 low-pass vs. FLAC wideband tell. --
     hf = np.array([float(np.mean(S[-_HF_BANDS:].sum(axis=0) / (frame_pow + 1e-10)))],
                   dtype=np.float32)                               # [1]
 
-    # -- 노이즈 플로어: 프레임 에너지(dB)의 5·10 백분위. --
+    # -- Noise floor: 5th/10th percentile of the frame energy (dB). --
     floor = np.array([float(np.percentile(frame_db, 5)),
                       float(np.percentile(frame_db, 10))], dtype=np.float32)  # [2]
 
-    # -- 침묵 프레임 로그멜: 가장 조용한 프레임들(하위 _SILENCE_PCTL%)의 평균 로그멜.
-    #    침묵은 억양을 담을 수 없으므로 순수 채널/마이크 노이즈 색채다. --
+    # -- Silent-frame log-mel: mean log-mel of the quietest frames (lowest _SILENCE_PCTL%).
+    #    Silence cannot carry an accent, so this is pure channel/microphone noise color. --
     thr = np.percentile(frame_db, _SILENCE_PCTL)
     sil_idx = np.where(frame_db <= thr)[0]
-    if sil_idx.size < 3:  # 거의 무음 없는 짧은 클립 — 가장 조용한 3프레임 사용
+    if sil_idx.size < 3:  # short clip with almost no silence — use the 3 quietest frames
         sil_idx = np.argsort(frame_db)[:3]
     silence = np.concatenate([
         logS[:, sil_idx].mean(axis=1),                 # [n_mels]
-        [float(frame_db[sil_idx].mean())],             # 침묵 레벨(dB)
+        [float(frame_db[sil_idx].mean())],             # silence level (dB)
     ]).astype(np.float32)                              # [n_mels+1]
 
     return {"ltas": ltas.astype(np.float32), "shape": shape,
@@ -205,7 +177,6 @@ def featurize(wav: np.ndarray) -> dict[str, np.ndarray]:
 
 def _featurize_path(args: tuple[str, int, str, str, float]):
     """joblib worker: load one clip and featurize it. Returns (feats, label, ...)."""
-    # joblib 워커: 한 클립을 로드·특징화. (특징, 라벨, source, country) 반환.
     path, label, source, country, max_seconds = args
     wav = _load_audio(Path(path), max_seconds)
     if wav is None:
@@ -219,18 +190,16 @@ def _featurize_path(args: tuple[str, int, str, str, float]):
 
 # ---------------------------------------------------------------------------
 # Feature-matrix assembly + probing
-# 특징 행렬 조립 + 프로브
 # ---------------------------------------------------------------------------
 def _matrix(rows: list[dict], keys: list[str]) -> np.ndarray:
     """Stack selected feature groups from a list of per-clip feature dicts."""
-    # 클립별 특징 dict 리스트에서 선택한 그룹들을 이어붙여 행렬로 만든다.
     return np.vstack([np.concatenate([r[k] for k in keys]) for r in rows])
 
 
 def _extract_split(df, curated_root: str, max_seconds: float, n_jobs: int,
                    tag: str):
     """Featurize every clip in a split. Returns (feats_list, labels, sources, countries)."""
-    # 한 분할의 모든 클립을 특징화한다. 실패 클립은 제외한다.
+    # Clips that fail to load are excluded.
     from joblib import Parallel, delayed
 
     jobs = []
@@ -253,8 +222,7 @@ def _extract_split(df, curated_root: str, max_seconds: float, n_jobs: int,
 
 def _fit_probe(Xtr, ytr, Xte, yte, *, multiclass: bool):
     """Fit a standardized logistic-regression probe; return metrics on the test split."""
-    # 표준화 + 로지스틱 회귀 프로브를 학습하고 test 분할 지표를 반환한다.
-    # class_weight='balanced' 로 불균형(특히 source 프로브)을 보정한다.
+    # class_weight='balanced' corrects for the imbalance (especially in the source probe).
     from sklearn.dummy import DummyClassifier
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import (
@@ -274,7 +242,7 @@ def _fit_probe(Xtr, ytr, Xte, yte, *, multiclass: bool):
     clf.fit(Xtr, ytr)
     pred = clf.predict(Xte)
 
-    # 우연 기준선: test 라벨 분포를 따르는 무작위 예측(stratified dummy).
+    # Chance baseline: random predictions following the test label distribution (stratified dummy).
     dummy = DummyClassifier(strategy="stratified", random_state=SEED)
     dummy.fit(Xtr, ytr)
     dpred = dummy.predict(Xte)
@@ -303,15 +271,13 @@ def _fit_probe(Xtr, ytr, Xte, yte, *, multiclass: bool):
 
 # ---------------------------------------------------------------------------
 # Verdict
-# 판정
 # ---------------------------------------------------------------------------
-# v3(WavLM) 실제 모델의 내부 test macro-F1 (참조점; reports/2026-07-17-...md).
+# Internal test macro-F1 of the actual v3 (WavLM) model (reference; reports/2026-07-17-...md).
 V3_TEST_MACRO_F1 = 0.624
 
 
 def _severity(silence_mf1: float, chance_mf1: float) -> str:
     """Grade leakage mainly from the SILENCE probe (accent-impossible, so cleanest)."""
-    # 누수 등급은 주로 침묵 프로브로 매긴다(억양이 불가능하므로 가장 깨끗한 신호).
     lift = silence_mf1 - chance_mf1
     if silence_mf1 >= 0.45 or lift >= 0.30:
         return "SEVERE"
@@ -331,8 +297,7 @@ def _print_confusion(cm: list[list[int]]) -> None:
 
 def run(curated_root: str, per_class: int, max_seconds: float, n_jobs: int) -> dict:
     """Build splits, featurize, run all probes, and return the report dict."""
-    # 분할 생성 → 특징화 → 전 프로브 실행 → 리포트 dict 반환.
-    # 실제 모델과 동일한 화자분리 분할을 쓴다(train 으로 프로브 학습, test 로 평가).
+    # Uses the same speaker-disjoint splits as the real model (fit on train, evaluate on test).
     train_df, _val_df, test_df = build_splits(
         curated_root=curated_root, per_class=per_class, seed=SEED)
     report("probe-train", train_df)
@@ -363,8 +328,8 @@ def run(curated_root: str, per_class: int, max_seconds: float, n_jobs: int) -> d
             (Xte), (te_y[mte] == ca).astype(int), multiclass=False)
 
     # -- 3) GLOBE↔SAA source probe (positive control) --
-    #    소스가 둘 다 있는 경우에만(대개 SAA 가 소수라도 존재). 특징이 채널을
-    #    실제로 잡는지 검증 — 거의 완벽해야 정상.
+    #    Only when both sources are present (SAA usually exists, even if as a minority).
+    #    Verifies that the features really capture the channel — near-perfect is expected.
     def _src_bin(s):
         return np.array([1 if str(x).upper() == "SAA" else 0 for x in s])
     ytr_src, yte_src = _src_bin(tr_src), _src_bin(te_src)
@@ -442,7 +407,6 @@ def _print_report(rep: dict) -> None:
 
 # ---------------------------------------------------------------------------
 # self-test (no audio / no GCS needed) — validates the feature pipeline
-# 자기검증 (오디오/GCS 불필요) — 특징 파이프라인이 도는지 확인
 # ---------------------------------------------------------------------------
 def _selftest() -> int:
     rng = np.random.default_rng(0)
@@ -457,7 +421,7 @@ def _selftest() -> int:
         if not all(np.isfinite(f[k]).all() for k in f):
             print("  ! non-finite feature value")
             dims_ok = False
-    # 짧은 클립(패딩 경로)과 조립 함수도 확인.
+    # Also check a short clip (the padding path) and the assembly function.
     short = rng.standard_normal(50).astype(np.float32)
     fs = featurize(np.pad(short, (0, _N_FFT)))
     M = _matrix([featurize(wav), fs], PROBE_FEATURES["lowlevel"])

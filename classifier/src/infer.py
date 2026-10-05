@@ -7,15 +7,6 @@ Example:
     python infer.py path/to/clip.mp3
     python infer.py clip.mp3 --frames --plot heatmap.png
 """
-# 학습된 억양 분류기를 단일 오디오 파일에 대해 실행(추론)하는 스크립트.
-#
-# 기본적으로 각 억양 클래스에 대한 근접도(확률)를 퍼센트로 출력한다(Level 1).
-# --frames 옵션을 주면 프레임(시간) 단위 확률까지 함께 반환하며, 이는
-# Level 2에서 사용할 "시간축 억양 히트맵"의 재료가 된다.
-#
-# 실행 예시:
-#     python infer.py path/to/clip.mp3
-#     python infer.py clip.mp3 --frames --plot heatmap.png
 from __future__ import annotations
 
 import argparse
@@ -32,11 +23,12 @@ from model import AccentClassifier, load_from_dir
 
 
 def load_trained(model_dir: Path) -> tuple[AccentClassifier, "AutoFeatureExtractor", list[str]]:
-    # 저장된 모델 디렉터리로부터 모델 가중치, feature extractor, 레이블 목록을
-    # 불러온다. label_config.json이 있으면 그 안의 레이블 순서를 우선 사용한다
-    # (혹시 학습 당시 config.LABELS와 달라졌을 경우를 대비).
-    # load_from_dir 는 model_config.json 을 읽어 학습 때와 동일한 백본·헤드·
-    # 레이어가중 구조로 골격을 만든다(구버전 체크포인트는 레거시 기본값으로 폴백).
+    # Load the model weights, feature extractor and label list from the saved model
+    # directory. If label_config.json exists, its label order takes precedence (in case it
+    # differs from config.LABELS at training time).
+    # load_from_dir reads model_config.json and builds the skeleton with the same backbone,
+    # head and layer-weighting structure as in training (older checkpoints fall back to the
+    # legacy defaults).
     model = load_from_dir(model_dir)
     safepath = model_dir / "model.safetensors"
     binpath = model_dir / "pytorch_model.bin"
@@ -61,8 +53,9 @@ def load_trained(model_dir: Path) -> tuple[AccentClassifier, "AutoFeatureExtract
 
 @torch.no_grad()
 def predict(model, feature_extractor, audio_path: Path, want_frames: bool = False):
-    # 단일 오디오 파일을 로드하여 전처리한 뒤 모델에 통과시키고,
-    # 발화 전체 확률(및 필요 시 프레임별 확률, fake 헤드가 있으면 real/fake 확률)을 반환.
+    # Load and preprocess a single audio file, run it through the model, and return the
+    # utterance-level probabilities (plus per-frame probabilities on request, and real/fake
+    # probabilities when the model has a fake head).
     wav = load_audio(audio_path)
     inputs = feature_extractor(
         [wav], sampling_rate=SAMPLE_RATE, return_attention_mask=True, return_tensors="pt"
@@ -70,14 +63,14 @@ def predict(model, feature_extractor, audio_path: Path, want_frames: bool = Fals
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
     out = model(**inputs, output_frame_logits=want_frames)
-    # softmax로 로짓을 확률 분포로 변환. 배치 크기가 1이므로 [0]으로 꺼냄.
+    # softmax turns the logits into a probability distribution. The batch size is 1, so take [0].
     probs = torch.softmax(out.logits, dim=-1)[0].cpu().numpy()
     frame_probs = None
-    # attentive 풀링 헤드는 프레임 로짓을 제공하지 않는다(발화 로짓이 프레임의
-    # 단순 평균이 아니므로). 그 경우 frame_probs 는 None 으로 둔다.
+    # The attentive pooling head provides no frame logits (the utterance logits are not a
+    # plain mean of the frames). frame_probs stays None in that case.
     if want_frames and out.frame_logits is not None:
         frame_probs = torch.softmax(out.frame_logits, dim=-1)[0].cpu().numpy()  # [T, C]
-    # real/fake 헤드가 있는 모델이면 이진 확률도 함께 반환(없으면 None).
+    # For models with a real/fake head, also return the binary probabilities (None otherwise).
     fake_probs = None
     if getattr(model, "fake_head_enabled", False) and out.fake_logits is not None:
         fake_probs = torch.softmax(out.fake_logits, dim=-1)[0].cpu().numpy()  # [2]
@@ -89,16 +82,16 @@ def main() -> None:
     ap.add_argument("audio")
     ap.add_argument("--model-dir", default=str(OUTPUT_DIR))
     ap.add_argument("--frames", action="store_true", help="also compute frame-level probs")
-    # 프레임 단위 확률도 함께 계산할지 여부.
+    # Whether to also compute frame-level probabilities.
     ap.add_argument("--plot", default=None, help="save a frame-level heatmap PNG (implies --frames)")
-    # 히트맵 PNG를 저장할 경로. 지정하면 자동으로 --frames도 활성화된 것으로 간주.
+    # Path for the heatmap PNG. When given, --frames is treated as enabled automatically.
     args = ap.parse_args()
 
     model, fe, labels = load_trained(Path(args.model_dir))
     want_frames = args.frames or args.plot is not None
     probs, frame_probs, fake_probs = predict(model, fe, Path(args.audio), want_frames)
 
-    # real/fake 헤드가 있는 모델이면 먼저 위조 여부를 출력(가장 중요한 판정).
+    # For models with a real/fake head, print the spoof verdict first (the most important one).
     if fake_probs is not None:
         fake_labels = FAKE_LABELS
         cfg = Path(args.model_dir) / "label_config.json"
@@ -109,7 +102,7 @@ def main() -> None:
         for i, name in enumerate(fake_labels):
             print(f"  {name:10s} {fake_probs[i] * 100:5.1f}%")
 
-    # 확률이 높은 순서대로 정렬해서 출력 (가장 가능성 높은 억양이 먼저 나옴).
+    # Print sorted by descending probability (the most likely accent first).
     order = np.argsort(probs)[::-1]
     print(f"\nAccent proximity for {args.audio}:")
     for i in order:
@@ -120,13 +113,11 @@ def main() -> None:
     elif args.plot is not None:
         import matplotlib
 
-        matplotlib.use("Agg")  # GUI 없는 환경(서버 등)에서도 동작하도록 백엔드 고정
+        matplotlib.use("Agg")  # fixed backend so it also works without a GUI (e.g. on servers)
         import matplotlib.pyplot as plt
 
         fig, ax = plt.subplots(figsize=(10, 3))
         # ~20ms per wav2vec2 frame; x in seconds
-        # wav2vec2의 프레임 하나는 대략 20ms에 해당하므로, 이를 이용해
-        # 프레임 인덱스를 실제 시간(초)으로 환산한다.
         t = np.arange(frame_probs.shape[0]) * 0.02
         for c, name in enumerate(labels):
             ax.plot(t, frame_probs[:, c], label=name)

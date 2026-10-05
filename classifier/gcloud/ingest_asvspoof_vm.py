@@ -25,11 +25,6 @@ control, DATASET.md 5).
 Manifest schema (one row per clip):
     fname,source,speaker,key,system_id,split
 """
-# 임시 ASVspoof 인제스트 VM 위에서 실행된다 (ingest_asvspoof.sh 참고).
-# HuggingFace 데이터셋을 스트리밍으로 받아, 원본 WAV 바이트를 재인코딩 없이
-# 버킷의 curated_spoof/asvspoof2019_la/<split>/ 에 그대로 쓴다.
-# 원본 프로토콜 스플릿(train/dev/eval)을 반드시 보존한다 — eval 은 train/dev 에
-# 없는 합성 시스템(A07~A19)을 쓰므로 랜덤 재분할하면 공격 유형이 누수된다.
 from __future__ import annotations
 
 import collections

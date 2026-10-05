@@ -15,24 +15,6 @@ Usage:
 Live dashboard (refresh button, no need to re-run manually):
     python serve_dataset_report.py
 """
-# 정제된(curated) 억양 음성 데이터셋을 위한 시각화 리포트 생성 모듈.
-#
-# 각 타깃 클래스별로 `curated/<국가코드>/manifest.csv`
-# (스키마: fname, source, speaker, gender, age, accent — 자세한 내용은
-# classifier/DATASET.md §2 참조)를 읽어들여, 차트들이 포함된 하나의
-# 독립적인(self-contained) HTML 리포트를 REPORT_OUT 경로에 생성한다.
-#
-# 이 모듈은 serve_dataset_report.py(새로고침 버튼이 있는 로컬 웹 서버)에서도
-# 그대로 재사용된다. CLI로 1회성 정적 파일만 만들 수도, 서버로 띄워서
-# 버튼 클릭마다 다시 읽어오게 할 수도 있다.
-#
-# 사용 예시:
-#     python inspect_dataset.py
-#     python inspect_dataset.py --root gs://qi-ucsd-speech-us/curated
-#     python inspect_dataset.py --root ../curated --classes US UK IN KR
-#
-# 실시간 대시보드(수동 재실행 없이 버튼으로 갱신):
-#     python serve_dataset_report.py
 from __future__ import annotations
 
 import argparse
@@ -44,13 +26,13 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")  # 화면 출력 없는 환경(서버/CI)에서도 그림을 그릴 수 있도록 백엔드 고정
+matplotlib.use("Agg")  # fixed backend so figures can be drawn without a display (server/CI)
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# 대시보드 카드 톤에 맞춘 차트 팔레트/스타일. 흰 카드 위에 얹히므로 배경은
-# 투명, 축/그리드는 옅게 — 화면(CSS)과 이미지(matplotlib)가 같은 디자인처럼
-# 보이도록 통일한다.
+# Chart palette/style matched to the tone of the dashboard cards. The charts sit on white
+# cards, so the background is transparent and the axes/grid are faint — unified so that
+# the screen (CSS) and the images (matplotlib) look like one design.
 _ACCENT = "#6366f1"
 _PALETTE = ["#6366f1", "#22c55e", "#f59e0b", "#ec4899", "#06b6d4", "#8b5cf6", "#ef4444", "#84cc16"]
 _INK = "#0f172a"
@@ -87,40 +69,42 @@ plt.rcParams.update({
 })
 
 DEFAULT_ROOT = "gs://qi-ucsd-speech-usw2/curated"
-# 실제 빌드된 6클래스(country/accent 헤드). NG/JP는 소스 부재로 미구축, KR은
-# 반출 제한으로 별도 asia-northeast3 버킷 — 이 대시보드(usw2)에는 없음. DATASET.md §5.
+# The six classes actually built (country/accent head). NG/JP were not built for lack of
+# sources; KR lives in a separate asia-northeast3 bucket because of export restrictions —
+# it is not in this (usw2) dashboard. DATASET.md §5.
 DEFAULT_CLASSES = ["US", "UK", "CA", "AU", "IN", "CN"]
-# fake(합성음성) 탐지용 spoof 코퍼스 — v2 재구축(2026-07-22)으로 real:fake=35000:35000
-# 평탄(flat) 풀로 교체됨. 국가 curated/와 다른 프리픽스/스키마
+# Spoof corpus for fake (synthetic speech) detection — replaced by a flat
+# real:fake=35000:35000 pool in the v2 rebuild (2026-07-22). Its prefix/schema differ from
+# the country curated/ pool
 # (label,country,source,system_id,speaker,orig_split,fname,audio_uri,split).
-# 옛 curated_spoof/asvspoof2019_la/{train,dev,eval}/ 는 이제 이 풀의 read-only
-# 소스 데이터일 뿐 학습에도, 이 대시보드에도 더는 쓰이지 않는다. DATASET.md §10-11.
+# The old curated_spoof/asvspoof2019_la/{train,dev,eval}/ is now only read-only source
+# data for this pool and is no longer used for training or by this dashboard. DATASET.md §10-11.
 DEFAULT_SPOOF_ROOT = "gs://qi-ucsd-speech-usw2/curated_spoof/real_fake_5k"
 SPOOF_SPLITS = ["train", "val", "test"]
-# real_fake_5k의 precomputed split(화자 단위)은 공격 유형(system_id)을 가리지
-# 않아 test의 fake 지표가 낙관 편향된다 -- 그래서 fake 행만 system_id 티어로
-# 재배정해 test.csv 자체에 진짜 미지공격을 섞는다(4번째 버킷 없이). real은
-# precomputed split 그대로. classifier/src/config.py의 FAKE_TEST_ONLY_SYSTEMS/
-# FAKE_MIXED_SYSTEMS/FAKE_MIXED_TEST_FRACTION, src/prepare_data_multitask.py의
-# build_multitask_splits와 동일 로직 — 이 대시보드 컨테이너는 src/를 import하지
-# 않으므로(Dockerfile이 이 파일 + serve_dataset_report.py만 복사) 값을 중복
-# 유지한다. 값 바꾸면 두 곳 다 갱신할 것.
+# The precomputed (speaker-level) split of real_fake_5k does not hide the attack type
+# (system_id), so the fake metrics on test are optimistically biased -- therefore only
+# the fake rows are reassigned by system_id tier, so that test.csv itself contains
+# genuinely unseen attacks (without a fourth bucket). real rows keep the precomputed
+# split. Same logic as FAKE_TEST_ONLY_SYSTEMS/FAKE_MIXED_SYSTEMS/FAKE_MIXED_TEST_FRACTION
+# in classifier/src/config.py and build_multitask_splits in src/prepare_data_multitask.py
+# — this dashboard container does not import src/ (the Dockerfile copies only this file +
+# serve_dataset_report.py), so the values are duplicated here. Update both when changing them.
 FAKE_TEST_ONLY_SYSTEMS = frozenset({"A17", "A18", "A19"})
 FAKE_MIXED_SYSTEMS = frozenset({"A16"})
 FAKE_MIXED_TEST_FRACTION = 0.33
 _VAL_FRACTION = 0.15
 _TEST_FRACTION = 0.15
-# 최종 HTML 리포트가 저장될 기본 경로 (classifier/reports/dataset_report.html)
-# 이 파일은 classifier/src/dashboard/ 아래에 있으므로 3단계 위가 classifier/.
+# Default path of the final HTML report (classifier/reports/dataset_report.html).
+# This file lives under classifier/src/dashboard/, so classifier/ is three levels up.
 REPORT_OUT = Path(__file__).resolve().parent.parent.parent / "reports" / "dataset_report.html"
 
-_gcs_client = None  # lazy-init — Cloud Run/로컬 모두 google-cloud-storage 하나로 통일
+_gcs_client = None  # lazy-init — google-cloud-storage alone for both Cloud Run and local runs
 
 
 def _gcs():
-    # google-cloud-storage 클라이언트를 지연 생성한다. 인증은 ADC(Application
-    # Default Credentials)를 쓴다: Cloud Run에서는 서비스 계정으로 자동 처리되고,
-    # 로컬에서는 `gcloud auth application-default login` 한 번이면 된다.
+    # Lazily create the google-cloud-storage client. Authentication uses ADC (Application
+    # Default Credentials): on Cloud Run the service account handles it automatically, and
+    # locally a single `gcloud auth application-default login` is enough.
     global _gcs_client
     if _gcs_client is None:
         from google.cloud import storage
@@ -130,9 +114,9 @@ def _gcs():
 
 
 def read_manifest(root: str, cc: str) -> pd.DataFrame | None:
-    # 특정 클래스(국가 코드, 예: "US")의 manifest.csv를 읽어온다.
-    # root가 gs:// 로 시작하면 google-cloud-storage로 읽고, 로컬 경로면
-    # 그냥 파일을 연다. 파일이 없으면 None을 반환.
+    # Read the manifest.csv of one class (country code, e.g. "US").
+    # If root starts with gs:// it is read with google-cloud-storage; for a local path the
+    # file is simply opened. Returns None when the file does not exist.
     path = f"{root.rstrip('/')}/{cc}/manifest.csv"
     if root.startswith("gs://"):
         bucket_name, _, prefix = root[len("gs://"):].partition("/")
@@ -150,8 +134,8 @@ def read_manifest(root: str, cc: str) -> pd.DataFrame | None:
 
 
 def collect_manifests(root: str, classes: list[str]) -> dict[str, pd.DataFrame]:
-    # classes에 있는 모든 클래스의 manifest.csv를 읽어 {클래스: DataFrame} 딕셔너리로 모은다.
-    # 서버 모드에서 "새로고침" 버튼을 누를 때마다 이 함수가 다시 호출된다.
+    # Read manifest.csv for every class in classes and collect them into a {class: DataFrame} dict.
+    # In server mode this function is called again each time the "Refresh" button is pressed.
     print(f"Reading manifests from {root} ...")
     dfs: dict[str, pd.DataFrame] = {}
     for cc in classes:
@@ -163,11 +147,11 @@ def collect_manifests(root: str, classes: list[str]) -> dict[str, pd.DataFrame]:
 
 
 def read_real_fake_manifest(root: str) -> pd.DataFrame | None:
-    # curated_spoof/real_fake_5k/manifest.csv 를 읽는다 (평탄한 단일 파일, 스플릿별
-    # 하위 디렉터리 없음). 스키마: label(real/fake), country, source, system_id,
+    # Read curated_spoof/real_fake_5k/manifest.csv (a single flat file, no per-split
+    # subdirectories). Schema: label (real/fake), country, source, system_id,
     # speaker, orig_split, fname, audio_uri, split(train/val/test). DATASET.md §11.
-    # ASVspoof(real anchor)의 country 값이 문자 그대로 "NA"라서, pandas 기본
-    # na_values(NA 포함)에 걸려 NaN으로 깨지지 않도록 keep_default_na=False.
+    # The country value of ASVspoof rows (real anchor) is literally "NA"; keep_default_na=False
+    # keeps pandas' default na_values (which include NA) from turning it into NaN.
     path = f"{root.rstrip('/')}/manifest.csv"
     if root.startswith("gs://"):
         bucket_name, _, prefix = root[len("gs://"):].partition("/")
@@ -185,7 +169,8 @@ def read_real_fake_manifest(root: str) -> pd.DataFrame | None:
 
 
 def _assign_by_speaker(speakers: list[str], fractions: dict[str, float], seed: int) -> dict[str, str]:
-    # src/prepare_data_multitask.py::_assign_by_speaker 와 동일 로직(중복 유지, 위 상수 주석 참고).
+    # Same logic as src/prepare_data_multitask.py::_assign_by_speaker (duplicated; see the
+    # comment on the constants above).
     ordered = sorted(speakers)
     rng = random.Random(seed)
     rng.shuffle(ordered)
@@ -202,9 +187,10 @@ def _assign_by_speaker(speakers: list[str], fractions: dict[str, float], seed: i
 
 
 def collect_spoof_manifests(root: str, splits: list[str]) -> dict[str, pd.DataFrame]:
-    # 평탄 매니페스트를 한 번 읽는다. real은 precomputed split 컬럼 그대로, fake는
-    # system_id 티어로 재배정한다(src/prepare_data_multitask.py::build_multitask_splits
-    # 와 동일 로직 -- 대시보드도 학습 파이프라인이 실제로 보는 분할과 일치시킨다).
+    # Read the flat manifest once. real rows keep the precomputed split column; fake rows
+    # are reassigned by system_id tier (same logic as
+    # src/prepare_data_multitask.py::build_multitask_splits -- so the dashboard matches the
+    # splits the training pipeline actually sees).
     print(f"Reading real/fake manifest from {root} ...")
     df = read_real_fake_manifest(root)
     if df is None or not len(df):
@@ -249,7 +235,7 @@ def collect_spoof_manifests(root: str, splits: list[str]) -> dict[str, pd.DataFr
 
 
 def chart_spoof_composition(spoof_dfs: dict[str, pd.DataFrame]) -> str:
-    # 스플릿별 real/fake 클립 수를 누적 막대그래프로 표시.
+    # Stacked bar chart of the real/fake clip counts per split.
     fig, ax = plt.subplots(figsize=(8.4, 5.2))
     splits = list(spoof_dfs.keys())
     real = [int((spoof_dfs[s]["label"] == "real").sum()) for s in splits]
@@ -266,9 +252,10 @@ def chart_spoof_composition(spoof_dfs: dict[str, pd.DataFrame]) -> str:
 
 
 def chart_spoof_attack_systems(spoof_dfs: dict[str, pd.DataFrame]) -> str:
-    # 스플릿별 fake 공격 시스템(system_id) 분포. v2 재구축 이후 train/val/test는
-    # 화자단위 무작위 분할이라 A01-A19가 세 스플릿에 모두 섞여 있는 게 정상
-    # (더 이상 ASVspoof의 미지-공격 프로토콜 경계를 보존하지 않음, DATASET.md §11 §12).
+    # Distribution of fake attack systems (system_id) per split. Since the v2 rebuild,
+    # train/val/test are random speaker-level splits, so A01-A19 appearing in all three splits
+    # is expected (the ASVspoof unseen-attack protocol boundary is no longer preserved,
+    # DATASET.md §11 §12).
     fig, ax = plt.subplots(figsize=(9.6, 5.2))
     splits = list(spoof_dfs.keys())
     all_systems = sorted({sid for df in spoof_dfs.values()
@@ -286,9 +273,10 @@ def chart_spoof_attack_systems(spoof_dfs: dict[str, pd.DataFrame]) -> str:
 
 
 def chart_real_by_country(spoof_dfs: dict[str, pd.DataFrame]) -> str:
-    # real 쪽 구성 — 국가 6버킷(US/UK/CA/AU/IN/CN) + ASVspoof bonafide(NA)를
-    # 스플릿별 누적 막대그래프로 표시. AU/IN/CN은 5000 채우려고 중복복사(dup)로
-    # 보강됐음(DATASET.md §11) — 이 차트는 그 보강까지 포함한 최종 구성이다.
+    # Composition of the real side — the six country buckets (US/UK/CA/AU/IN/CN) + ASVspoof
+    # bonafide (NA) as a stacked bar chart per split. AU/IN/CN were padded with duplicate
+    # copies (dup) to reach 5000 (DATASET.md §11) — the chart shows the final composition
+    # including that padding.
     fig, ax = plt.subplots(figsize=(9.2, 5.2))
     splits = list(spoof_dfs.keys())
     all_countries = sorted({c for df in spoof_dfs.values()
@@ -307,7 +295,7 @@ def chart_real_by_country(spoof_dfs: dict[str, pd.DataFrame]) -> str:
 
 
 def build_spoof_summary_table(spoof_dfs: dict[str, pd.DataFrame]) -> str:
-    # 스플릿별 요약: 클립 수, real/fake, 화자 수, 공격 시스템 목록.
+    # Per-split summary: clip count, real/fake, speaker count, list of attack systems.
     rows = []
     tot_clips = tot_real = tot_fake = tot_spk = 0
     for split, df in spoof_dfs.items():
@@ -346,13 +334,14 @@ def build_spoof_summary_table(spoof_dfs: dict[str, pd.DataFrame]) -> str:
     )
 
 
-# fname 접두어 -> 소스 코드. 용량을 소스별로 쪼개 길이를 추정할 때 쓴다.
+# fname prefix -> source code. Used to split the storage by source when estimating duration.
 _PREFIX_TO_SOURCE = {"glb_": "GLOBE", "saa_": "SAA"}
 
-# 소스별(코덱별) 대략적인 초당 바이트. curated 오디오는 GLOBE=FLAC@24kHz,
-# SAA=mp3 라서 코덱이 다르다. manifest 에는 길이(duration) 컬럼이 없으므로,
-# 실제 오디오를 내려받지 않고 "파일 용량 ÷ 초당바이트"로 총 길이를 어림한다.
-# 이 값들은 추정치이며(압축률·비트레이트에 따라 달라짐) 화면에도 "est."로 표기한다.
+# Approximate bytes per second per source (codec). Curated audio is GLOBE=FLAC@24kHz and
+# SAA=mp3, so the codecs differ. The manifest has no duration column, so the total
+# duration is estimated as "file size ÷ bytes per second" without downloading the audio.
+# These values are estimates (they vary with compression ratio/bitrate) and are labelled
+# "est." on screen.
 _EST_BYTES_PER_SEC = {"GLOBE": 26_000.0, "SAA": 16_000.0, "other": 20_000.0}
 
 
@@ -364,7 +353,7 @@ def _source_of(fname: str) -> str:
 
 
 def _est_seconds(by_source: dict[str, int]) -> float:
-    # 소스별 용량을 각 코덱의 초당바이트로 나눠 더한 "추정" 총 길이(초).
+    # "Estimated" total duration (seconds): per-source size divided by that codec's bytes per second.
     return sum(b / _EST_BYTES_PER_SEC.get(src, _EST_BYTES_PER_SEC["other"])
                for src, b in by_source.items())
 
@@ -379,10 +368,8 @@ def collect_audio_stats(root: str, classes: list[str]) -> dict[str, dict]:
     classes whose audio dir can't be listed are simply omitted (size is an
     enhancement — never let it break the counts view).
     """
-    # 클래스별 오디오 "용량" 통계를 오브젝트 메타데이터만으로 집계한다(오디오 자체는
-    # 내려받지 않음 → curated 는 Standard 스토리지라 비용 부담 없음). blob.size 를
-    # 합산하고 fname 접두어(glb_/saa_)로 소스별로 쪼갠다. 나열 실패한 클래스는 조용히
-    # 건너뛴다(용량은 부가 정보이므로 클립수 화면을 절대 깨뜨리지 않는다).
+    # Only metadata is read (no audio download); curated is Standard storage, so there is no
+    # extra cost.
     stats: dict[str, dict] = {}
     root = root.rstrip("/")
     for cc in classes:
@@ -413,13 +400,13 @@ def collect_audio_stats(root: str, classes: list[str]) -> dict[str, dict]:
                 stats[cc] = {"n": n, "bytes": total, "by_source": by_source,
                              "est_seconds": _est_seconds(by_source)}
                 print(f"  {cc}: {n} audio files, {human_size(total)}")
-        except Exception as exc:  # 용량 집계 실패는 치명적이지 않다 — 건너뛴다.
+        except Exception as exc:  # a failed size aggregation is not fatal — skip it.
             print(f"  ! {cc}: audio stat failed: {exc}")
     return stats
 
 
 def human_size(nbytes: float) -> str:
-    # 바이트를 사람이 읽기 좋은 단위(KB/MB/GB)로 변환.
+    # Convert bytes to a human-readable unit (KB/MB/GB).
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if nbytes < 1024 or unit == "TB":
             return f"{nbytes:.0f} {unit}" if unit == "B" else f"{nbytes:.1f} {unit}"
@@ -428,7 +415,7 @@ def human_size(nbytes: float) -> str:
 
 
 def human_duration(seconds: float) -> str:
-    # 초를 "Xh Ym" / "Ym Zs" 형태로 변환.
+    # Convert seconds to the form "Xh Ym" / "Ym Zs".
     seconds = int(round(seconds))
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
@@ -440,8 +427,8 @@ def human_duration(seconds: float) -> str:
 
 
 def fig_to_data_uri(fig: plt.Figure) -> str:
-    # matplotlib Figure를 PNG로 렌더링한 뒤 base64로 인코딩해 data URI로 변환.
-    # 이렇게 하면 별도 이미지 파일 없이 HTML 하나에 모든 차트를 임베드할 수 있다.
+    # Render the matplotlib Figure to PNG and base64-encode it into a data URI.
+    # This embeds every chart in a single HTML file without separate image files.
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=140, transparent=True)
     plt.close(fig)
@@ -455,7 +442,7 @@ def _bar_labels(ax, xs, vals, fmt="{:.0f}"):
 
 
 def chart_clips_per_class(dfs: dict[str, pd.DataFrame]) -> str:
-    # 클래스(억양)별 클립 개수를 막대그래프로 표시.
+    # Bar chart of the number of clips per class (accent).
     fig, ax = plt.subplots(figsize=(8.4, 5.2))
     classes = list(dfs.keys())
     counts = [len(dfs[c]) for c in classes]
@@ -467,7 +454,7 @@ def chart_clips_per_class(dfs: dict[str, pd.DataFrame]) -> str:
 
 
 def chart_speakers_per_class(dfs: dict[str, pd.DataFrame]) -> str:
-    # 클래스별 고유 화자(speaker) 수를 막대그래프로 표시.
+    # Bar chart of the number of unique speakers per class.
     fig, ax = plt.subplots(figsize=(8.4, 5.2))
     classes = list(dfs.keys())
     counts = [dfs[c]["speaker"].nunique() for c in classes]
@@ -479,8 +466,8 @@ def chart_speakers_per_class(dfs: dict[str, pd.DataFrame]) -> str:
 
 
 def chart_source_breakdown(dfs: dict[str, pd.DataFrame]) -> str:
-    # 클래스별로 데이터 출처(source, 예: Common Voice/자체수집 등) 비중을
-    # 누적 막대그래프(stacked bar)로 표시.
+    # Stacked bar chart of the share of each data source (e.g. Common Voice, self-collected)
+    # per class.
     all_sources = sorted({s for df in dfs.values() for s in df["source"].unique()})
     fig, ax = plt.subplots(figsize=(9.2, 5.2))
     classes = list(dfs.keys())
@@ -497,7 +484,7 @@ def chart_source_breakdown(dfs: dict[str, pd.DataFrame]) -> str:
 
 
 def chart_storage_per_class(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) -> str:
-    # 클래스별 오디오 총 용량(MB)을 소스별 누적 막대그래프로 표시.
+    # Stacked bar chart (by source) of the total audio size (MB) per class.
     classes = [c for c in dfs if c in stats]
     fig, ax = plt.subplots(figsize=(8.4, 5.2))
     if not classes:
@@ -521,7 +508,7 @@ def chart_storage_per_class(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]
 
 
 def chart_gender_balance(dfs: dict[str, pd.DataFrame]) -> str:
-    # 클래스별 성별(F/M/미상 U) 분포를 누적 막대그래프로 표시.
+    # Stacked bar chart of the gender distribution (F/M/unknown U) per class.
     fig, ax = plt.subplots(figsize=(9.2, 5.2))
     classes = list(dfs.keys())
     genders = ["F", "M", "U"]
@@ -540,7 +527,7 @@ def chart_gender_balance(dfs: dict[str, pd.DataFrame]) -> str:
 
 
 def build_headline(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) -> str:
-    # 데이터셋 전체 규모를 한눈에 보는 상단 통계 카드 묶음.
+    # Top stat cards that show the overall size of the dataset at a glance.
     total_clips = sum(len(df) for df in dfs.values())
     total_speakers = sum(df["speaker"].nunique() for df in dfs.values())
     total_bytes = sum(s["bytes"] for s in stats.values())
@@ -565,7 +552,8 @@ def build_headline(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) -> str:
 
 
 def build_summary_table(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) -> str:
-    # 클래스별 요약 통계(클립 수, 화자 수, 성비, 용량, 추정 길이, 출처)를 HTML 표로 생성.
+    # Build an HTML table of per-class summary statistics (clips, speakers, gender ratio, size,
+    # estimated duration, sources).
     has_size = bool(stats)
     size_head = "<th>Size</th><th>Avg clip</th><th>Est. dur.</th>" if has_size else ""
     rows = []
@@ -594,7 +582,7 @@ def build_summary_table(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) ->
                 size_cells = "<td>—</td><td>—</td><td>—</td>"
         rows.append(f"<tr><td>{cc}</td><td>{clips}</td><td>{speakers}</td>"
                      f"<td>{f} / {m}</td>{size_cells}<td>{sources}</td></tr>")
-    # 합계 행
+    # totals row
     tot_size_cells = ""
     if has_size:
         avg_kb = tot_bytes / max(tot_n, 1) / 1024
@@ -613,8 +601,8 @@ def build_summary_table(dfs: dict[str, pd.DataFrame], stats: dict[str, dict]) ->
     )
 
 
-# 리포트 "본문" 템플릿(표 + 차트). 정적 HTML 파일에도, 서버 모드의 새로고침
-# 응답(innerHTML 교체)에도 그대로 재사용된다.
+# Template of the report "body" (table + charts). Reused as-is by the static HTML file and
+# by the refresh response in server mode (innerHTML replacement).
 BODY_TEMPLATE = """<p class="meta">Source root: <code>{root}</code> &middot; generated {generated}</p>
 {headline}
 <div class="card table-card">{table}</div>
@@ -628,8 +616,9 @@ BODY_TEMPLATE = """<p class="meta">Source root: <code>{root}</code> &middot; gen
 {spoof_section}
 """
 
-# fake(합성음성) 탐지용 real/fake 풀 섹션. spoof_dfs가 없으면(root 미지정/미발견)
-# 조용히 빈 문자열을 반환해 country-only 리포트도 그대로 동작한다.
+# Section for the real/fake pool used for fake (synthetic speech) detection. Without
+# spoof_dfs (root not given/not found) it quietly returns an empty string, so country-only
+# reports keep working.
 SPOOF_SECTION_TEMPLATE = """<h2 class="section-title">Real/fake (fake-voice) pool &middot; curated_spoof/real_fake_5k</h2>
 <p class="meta">Pool root: <code>{spoof_root}</code></p>
 <div class="card table-card">{table}</div>
@@ -640,8 +629,8 @@ SPOOF_SECTION_TEMPLATE = """<h2 class="section-title">Real/fake (fake-voice) poo
 </div>
 """
 
-# 공통 디자인 토큰/베이스 스타일. serve_dataset_report.py도 이 팔레트를 그대로 쓴다
-# (정적 리포트와 라이브 대시보드가 같은 룩앤필을 갖도록).
+# Shared design tokens/base styles. serve_dataset_report.py uses the same palette
+# (so the static report and the live dashboard share one look and feel).
 SHARED_STYLE = """
 :root {{
   --bg: #f1f5f9; --bg-grad: linear-gradient(180deg, #eef2ff 0%, #f1f5f9 320px);
@@ -693,8 +682,8 @@ tr.total td {{ font-weight: 700; border-top: 2px solid var(--accent); background
 }}
 """
 
-# 정적 파일용 페이지 전체 템플릿(<html>/<head> 포함). 서버 모드는 자체 페이지에
-# render_body()의 결과만 끼워 넣으므로 이 템플릿을 쓰지 않는다.
+# Full-page template for the static file (including <html>/<head>). Server mode only inserts
+# the result of render_body() into its own page and does not use this template.
 PAGE_TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Curated dataset report</title>
@@ -709,7 +698,7 @@ PAGE_TEMPLATE = """<!doctype html>
 
 
 def render_spoof_section(spoof_root: str | None, spoof_splits: list[str]) -> str:
-    # spoof_root가 없으면(비활성) 빈 문자열 — country-only 리포트 하위호환.
+    # No spoof_root (disabled) → empty string — backward compatible with country-only reports.
     if not spoof_root:
         return ""
     spoof_dfs = collect_spoof_manifests(spoof_root, spoof_splits)
@@ -767,7 +756,7 @@ def main() -> None:
 
     dfs = collect_manifests(args.root, args.classes)
     if not dfs:
-        # 읽어들인 매니페스트가 하나도 없으면 리포트를 만들 수 없으므로 즉시 중단.
+        # Without any manifest a report cannot be built, so abort immediately.
         raise SystemExit("No manifests found — check --root and --classes.")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

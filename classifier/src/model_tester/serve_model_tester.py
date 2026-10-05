@@ -28,17 +28,6 @@ Usage:
     python serve_model_tester.py
     # then open http://127.0.0.1:8766/
 """
-# 학습된 모델을 GCS에서 골라, 브라우저에서 업로드하거나 즉석 녹음한 오디오로
-# 바로 테스트해보는 라이브 대시보드.
-#
-# 핵심: 모델은 사용자 PC로 절대 내려오지 않는다. Cloud Run 인스턴스가 선택된
-# 모델의 가중치를 GCS에서 자기 메모리로 받아 서버 측에서 추론을 돌린다.
-# 사용자는 오디오를 올리거나 녹음만 한다.
-#
-# serve_dataset_report.py 와 형제지간이지만, 일부러 "별도의" Cloud Run 서비스로
-# 둔다. 이쪽은 torch + transformers + ffmpeg 가 필요해 이미지가 수 GB로 무겁기
-# 때문에, 가벼운 데이터셋 대시보드에 합치면 그 페이지 콜드스타트까지 느려진다.
-# 두 페이지는 서로 링크로만 연결한다.
 from __future__ import annotations
 
 import json
@@ -60,29 +49,30 @@ from model import AccentClassifier, load_from_dir
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
 
-# 단일 사용자 로그인 정보. 데이터셋 대시보드와 동일한 기본값을 공유한다.
+# Single-user login. Shares the same defaults as the dataset dashboard.
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "geonah")
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS", "dmdlsldk2!")
 
-# 다른 서버가 /api/* 를 호출할 때 쓰는 정적 API 키. 데모용 — 회전/스코프 없이
-# 헤더 값만 비교한다. 배포 시 deploy.sh 가 env var로 주입한다.
+# Static API key that other servers use to call /api/*. Demo-grade — only the header
+# value is compared, with no rotation/scoping. deploy.sh injects it as an env var.
 API_KEY = os.environ.get("API_KEY", "dev-key-change-me")
 
-# 학습 job들이 쌓이는 GCS 접두어. 각 job은 <MODEL_ROOT>/<JOB_NAME>/model/ 아래에
-# model.safetensors / label_config.json / preprocessor_config.json / final_metrics.json 을 갖는다.
+# GCS prefix where the training jobs accumulate. Each job keeps model.safetensors /
+# label_config.json / preprocessor_config.json / final_metrics.json under
+# <MODEL_ROOT>/<JOB_NAME>/model/.
 MODEL_ROOT = os.environ.get(
     "MODEL_ROOT", "gs://qi-ucsd-speech-us/outputs/classifier"
 ).rstrip("/")
 
-# 데이터셋 대시보드로 돌아가는 링크(있으면 상단에 표시).
+# Link back to the dataset dashboard (shown at the top when set).
 DATASET_DASHBOARD_URL = os.environ.get("DATASET_DASHBOARD_URL", "")
 
-# 최대 업로드 크기(25MB). 짧은 테스트 클립이면 충분하고, 과도한 업로드를 막는다.
+# Maximum upload size (25 MB). Enough for short test clips; blocks excessive uploads.
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
-# GCS helpers  —  GCS 도우미
+# GCS helpers
 # ---------------------------------------------------------------------------
 def _split_gs(uri: str) -> tuple[str, str]:
     # "gs://bucket/prefix" -> ("bucket", "prefix")
@@ -97,7 +87,7 @@ _gcs_client: storage.Client | None = None
 
 
 def _client() -> storage.Client:
-    # storage.Client는 스레드마다 새로 만들 필요 없이 하나를 재사용한다.
+    # A single storage.Client is reused instead of creating a new one per thread.
     global _gcs_client
     with _gcs_lock:
         if _gcs_client is None:
@@ -113,15 +103,13 @@ def list_models() -> list[dict]:
     show accuracy, and sort by job name descending (names are timestamped, so
     lexicographic == chronological).
     """
-    # MODEL_ROOT 아래에서 model/model.safetensors 를 가진 job 폴더들을 모델로 보고,
-    # 각 모델의 final_metrics.json(정확도 등)을 함께 붙여 최신순으로 돌려준다.
     bucket_name, prefix = _split_gs(MODEL_ROOT)
     prefix = prefix.rstrip("/") + "/"
     bucket = _client().bucket(bucket_name)
 
-    # 접두어 바로 아래의 "폴더"(job 이름)만 얻기 위해 delimiter로 훑는다.
+    # List with a delimiter to get only the "folders" (job names) directly under the prefix.
     it = _client().list_blobs(bucket_name, prefix=prefix, delimiter="/")
-    list(it)  # prefixes는 순회를 마쳐야 채워진다
+    list(it)  # prefixes are only populated once the iteration has finished
     job_prefixes = sorted(it.prefixes, reverse=True)
 
     models: list[dict] = []
@@ -129,22 +117,22 @@ def list_models() -> list[dict]:
         job = jp[len(prefix):].strip("/")
         weights = bucket.blob(f"{prefix}{job}/model/model.safetensors")
         if not weights.exists():
-            continue  # 학습이 끝나 저장까지 마친 job만 노출
+            continue  # expose only jobs that finished training and saving
         entry: dict = {"job": job}
         metrics_blob = bucket.blob(f"{prefix}{job}/model/final_metrics.json")
         if metrics_blob.exists():
             try:
                 m = json.loads(metrics_blob.download_as_bytes())
-                # 멀티태스크 잡은 "test_accuracy" 대신 "test_country_accuracy"/
-                # "test_fake_macro_f1" 키를 쓴다 — 둘 다 폴백으로 받아준다.
+                # Multitask jobs use the "test_country_accuracy"/"test_fake_macro_f1" keys instead of
+                # "test_accuracy" — both are accepted as fallbacks.
                 multitask = bool(m.get("train_config", {}).get("multitask")) or "test_fake_macro_f1" in m
                 entry["multitask"] = multitask
                 entry["test_accuracy"] = m.get("test_accuracy", m.get("test_country_accuracy"))
                 entry["eval_accuracy"] = m.get("eval_accuracy", m.get("eval_country_accuracy"))
                 entry["macro_f1"] = m.get("test_macro_f1", m.get("test_country_macro_f1"))
                 entry["fake_macro_f1"] = m.get("test_fake_macro_f1")
-                # 나라별 상세치를 볼 수 있는 모델인지 표시(드롭다운은 가볍게 유지하고,
-                # 상세 지표 자체는 선택 시 /metrics/<job> 로 따로 받는다).
+                # Flag whether the model has a per-country breakdown (the dropdown stays light; the
+                # detailed metrics themselves are fetched separately from /metrics/<job> on selection).
                 entry["has_detail"] = ("test_detail" in m or "eval_detail" in m
                                        or any(k.startswith("test_f1_") for k in m))
             except Exception:
@@ -163,9 +151,6 @@ def get_metrics(job: str) -> dict:
     dashboard then shows per-country F1 bars even for pre-existing models, just
     without the confusion matrix.
     """
-    # 선택된 모델의 final_metrics.json 전체를 프론트가 쓰기 좋은 형태로 돌려준다.
-    # 신형 모델은 test_detail(혼동행렬·정밀도·재현율)을 갖고, 구형 모델은 평면적인
-    # test_f1_<LABEL> 스칼라만 있으므로 그것으로 클래스별 F1 뷰를 합성한다(혼동행렬은 없음).
     bucket_name, prefix = _split_gs(MODEL_ROOT)
     prefix = prefix.rstrip("/") + "/"
     bucket = _client().bucket(bucket_name)
@@ -176,7 +161,7 @@ def get_metrics(job: str) -> dict:
     multitask = bool(m.get("train_config", {}).get("multitask")) or "test_fake_macro_f1" in m
 
     def summary(split: str) -> dict:
-        # 멀티태스크 잡은 country 지표가 "{split}_country_*" 키를 쓴다(§list_models).
+        # Multitask jobs use "{split}_country_*" keys for the country metrics (see list_models).
         return {
             "accuracy": m.get(f"{split}_accuracy", m.get(f"{split}_country_accuracy")),
             "macro_f1": m.get(f"{split}_macro_f1", m.get(f"{split}_country_macro_f1")),
@@ -185,7 +170,7 @@ def get_metrics(job: str) -> dict:
             "fake_macro_f1": m.get(f"{split}_fake_macro_f1"),
         }
 
-    # 상세 블록: 신형은 그대로 사용, 구형은 f1 스칼라로 합성.
+    # Detail block: newer models use it as-is; older ones get it synthesized from f1 scalars.
     detail = m.get("test_detail") or m.get("eval_detail")
     if detail is None:
         for split in ("test", "eval"):
@@ -199,7 +184,7 @@ def get_metrics(job: str) -> dict:
                 }
                 break
 
-    # fake 헤드 클래스별(real/fake) F1 — 멀티태스크 잡만 갖는다.
+    # Per-class (real/fake) F1 of the fake head — only multitask jobs have it.
     fake_detail = None
     for split in ("test", "eval"):
         f1s = {k[len(f"{split}_fake_f1_"):]: v for k, v in m.items()
@@ -222,17 +207,18 @@ def get_metrics(job: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Model cache  —  로드된 모델 캐시
+# Model cache
 # ---------------------------------------------------------------------------
-# job 이름 -> (model, feature_extractor, labels). 첫 요청 때만 GCS에서 받아
-# 메모리에 올리고(느림), 이후 같은 인스턴스가 살아있는 동안은 재사용(빠름).
+# job name -> (model, feature_extractor, labels). Downloaded from GCS and loaded into
+# memory on the first request only (slow); reused while the instance stays alive (fast).
 _models: dict[str, tuple] = {}
 _model_lock = threading.Lock()
 
 
 def _download_model_dir(job: str, dst: Path) -> None:
-    # 선택된 job의 model/ 아래 추론에 필요한 파일들만 컨테이너 임시 디스크로 받는다.
-    # (checkpoint-*/ 같은 학습 중간물은 제외 — 추론엔 불필요하고 용량만 크다.)
+    # Download only the files needed for inference from the selected job's model/ directory
+    # to the container's temp disk (training intermediates such as checkpoint-*/ are excluded
+    # — unnecessary for inference and large).
     bucket_name, prefix = _split_gs(MODEL_ROOT)
     prefix = prefix.rstrip("/") + "/"
     bucket = _client().bucket(bucket_name)
@@ -240,8 +226,8 @@ def _download_model_dir(job: str, dst: Path) -> None:
         "model.safetensors",
         "label_config.json",
         "preprocessor_config.json",
-        # model_config.json 이 없으면 load_from_dir 가 항상 레거시 기본 구조(country만,
-        # fake_head=False)로 골격을 짓는다 — 멀티태스크/attentive 모델은 이 파일이 필수.
+        # Without model_config.json, load_from_dir always builds the legacy default structure
+        # (country only, fake_head=False) — multitask/attentive models require this file.
         "model_config.json",
     ]
     dst.mkdir(parents=True, exist_ok=True)
@@ -252,7 +238,7 @@ def _download_model_dir(job: str, dst: Path) -> None:
 
 
 def get_model(job: str):
-    # job에 해당하는 모델을 캐시에서 꺼내거나, 없으면 GCS에서 받아 로드해 캐시에 넣는다.
+    # Return the job's model from the cache; otherwise download it from GCS, load and cache it.
     with _model_lock:
         if job in _models:
             return _models[job]
@@ -269,9 +255,10 @@ def get_model(job: str):
         labels = cfg_data["labels"]
         fake_labels = cfg_data.get("fake_labels", FAKE_LABELS)
 
-    # 백본은 config로만 짓고(HF 재다운로드 없음) 우리 safetensors로 덮어쓴다.
-    # load_from_dir 가 model_config.json 을 읽어 학습 때와 동일한 백본·헤드·fake_head
-    # 구조를 만든다(구버전 체크포인트는 레거시 기본값=country만 으로 폴백).
+    # The backbone is built from the config only (no HF re-download) and overwritten with our
+    # safetensors. load_from_dir reads model_config.json and builds the same
+    # backbone/head/fake_head structure as in training (older checkpoints fall back to the
+    # legacy default = country only).
     model = load_from_dir(model_dir, num_labels=len(labels))
     from safetensors.torch import load_file
 
@@ -287,15 +274,13 @@ def get_model(job: str):
 
 
 # ---------------------------------------------------------------------------
-# Audio decoding  —  오디오 디코딩
+# Audio decoding
 # ---------------------------------------------------------------------------
 def decode_audio(raw: bytes) -> np.ndarray:
     """Decode arbitrary audio bytes (wav/mp3/webm/ogg/m4a...) to float32 mono
     16 kHz using ffmpeg. Browser MediaRecorder emits webm/opus, so we lean on
     ffmpeg rather than torchaudio/soundfile to cover every container.
     """
-    # 브라우저 녹음은 webm/opus로 오고 업로드는 mp3/wav 등 제각각이라, 컨테이너를
-    # 가리지 않는 ffmpeg로 통일해서 16kHz 모노 float32로 디코딩한다.
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error",
          "-i", "pipe:0", "-f", "f32le", "-ac", "1", "-ar", str(SAMPLE_RATE), "pipe:1"],
@@ -339,7 +324,7 @@ def run_inference(job: str, raw: bytes) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Auth  —  로그인 (데이터셋 대시보드와 동일한 패턴)
+# Auth  —  login (same pattern as the dataset dashboard)
 # ---------------------------------------------------------------------------
 def login_required(view):
     @wraps(view)
@@ -352,7 +337,7 @@ def login_required(view):
 
 
 def api_key_required(view):
-    # 세션 로그인이 아니라 X-API-Key 헤더로 인증하는 머신용 라우트에 붙인다.
+    # For machine-facing routes that authenticate via the X-API-Key header, not the session login.
     @wraps(view)
     def wrapped(*args, **kwargs):
         key = request.headers.get("X-API-Key", "")
@@ -363,8 +348,8 @@ def api_key_required(view):
     return wrapped
 
 
-# /api/* 를 브라우저에서 직접 호출하는 외부 서비스(해커톤 프론트엔드)를 위한 CORS.
-# 세션 로그인 라우트는 same-origin만 쓰므로 대상 밖 — /api/* 에만 헤더를 붙인다.
+# CORS for external services (the hackathon frontend) that call /api/* from the browser.
+# Session-login routes are same-origin only and out of scope — only /api/* gets the headers.
 CORS_ALLOWED_ORIGINS = {
     o.strip()
     for o in os.environ.get(
@@ -388,8 +373,8 @@ def add_cors_headers(response):
 
 @app.route("/api/<path:_path>", methods=["OPTIONS"])
 def api_cors_preflight(_path):
-    # 프리플라이트는 API 키 없이 온다 — 인증 없이 204만 돌려주고 위 after_request가
-    # 헤더를 붙인다.
+    # Preflight requests arrive without an API key — return just 204 without auth; the
+    # after_request hook above adds the headers.
     return "", 204
 
 
@@ -438,7 +423,7 @@ def logout():
 
 
 # ---------------------------------------------------------------------------
-# Page  —  메인 페이지
+# Page  —  main page
 # ---------------------------------------------------------------------------
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Model tester</title>
@@ -796,7 +781,7 @@ def models():
 @app.get("/metrics/<path:job>")
 @login_required
 def metrics(job: str):
-    # 선택된 모델의 상세 지표(나라별 정확도/F1 + 혼동행렬)를 반환.
+    # Return the selected model's detailed metrics (per-country accuracy/F1 + confusion matrix).
     try:
         return jsonify(ok=True, **get_metrics(job))
     except Exception as exc:
@@ -821,9 +806,9 @@ def predict():
 
 
 # ---------------------------------------------------------------------------
-# Machine API  —  다른 서버가 X-API-Key 헤더로 호출하는 JSON 전용 엔드포인트.
-# 브라우저 세션 로그인과 무관 — 위 /models, /metrics, /predict 와 로직은 같고
-# 인증 방식만 다르다 (서버 간 호출은 폼 로그인을 할 수 없으므로 분리).
+# Machine API  —  JSON-only endpoints that other servers call with the X-API-Key header.
+# Independent of the browser session login — same logic as /models, /metrics, /predict
+# above; only the authentication differs (server-to-server calls cannot use a form login).
 # ---------------------------------------------------------------------------
 @app.get("/api/models")
 @api_key_required
@@ -846,8 +831,8 @@ def api_metrics(job: str):
 @app.post("/api/predict")
 @api_key_required
 def api_predict():
-    # model 생략 시 가장 최신(list_models()가 최신순으로 반환) job을 쓴다 —
-    # 호출 서버가 job 이름을 몰라도 되게.
+    # When model is omitted, the newest job is used (list_models() returns newest first) —
+    # so the calling server does not need to know the job name.
     job = request.form.get("model")
     if not job:
         models = list_models()
