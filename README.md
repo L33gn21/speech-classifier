@@ -177,7 +177,17 @@ This project uses the following AI models for training, validation and test:
 
 ### References
 
-1. Wang, W., Song, Y., and Jha, S., "GLOBE: A High-quality English Corpus with Global Accents for Zero-shot Speaker Adaptive Text-to-Speech," in Proceedings of Interspeech 2024, pp. 1365–1369, 2024. [[DOI](https://doi.org/10.21437/Interspeech.2024-70)]
+1. Wang et al. (2024) — GLOBE, cited as its authors request on the [dataset page](https://huggingface.co/datasets/MushanW/GLOBE):
+
+   ```bibtex
+   @misc{wang2024globe,
+         title={GLOBE: A High-quality English Corpus with Global Accents for Zero-shot Speaker Adaptive Text-to-Speech}, 
+         author={Wenbin Wang and Yang Song and Sanjay Jha},
+         year={2024},
+         eprint={2406.14875},
+         archivePrefix={arXiv},
+   }
+   ```
 
 2. Weinberger, Steven. (2015). Speech Accent Archive. George Mason University. Retrieved from http://accent.gmu.edu [[Web](https://accent.gmu.edu)]
 
