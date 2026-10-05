@@ -177,40 +177,10 @@ This project uses the following AI models for training, validation and test:
 
 ### References
 
-1. Wang et al. (2024) — GLOBE:
+1. Xin Wang, Junichi Yamagishi, Massimiliano Todisco, Héctor Delgado, and Andreas Nautsch et al., "ASVspoof 2019: A Large-scale Public Database of Synthesized, Converted and Replayed Speech," Computer Speech & Language, vol. 64, no.101114, 2020. [[DOI]](https://doi.org/10.1016/j.csl.2020.101114)
 
-   ```bibtex
-   @misc{wang2024globe,
-         title={GLOBE: A High-quality English Corpus with Global Accents for Zero-shot Speaker Adaptive Text-to-Speech}, 
-         author={Wenbin Wang and Yang Song and Sanjay Jha},
-         year={2024},
-         eprint={2406.14875},
-         archivePrefix={arXiv},
-   }
-   ```
+2. Wenbin Wang, Yang Song, Sanjay Jha et al., "GLOBE: A High-quality English Corpus with Global Accents for Zero-shot Speaker Adaptive Text-to-Speech," Computer Science & Linguistics, pp. 1365-1369, 2024. [[DOI]](https://doi.org/10.48550/arXiv.2406.14875)
 
-2. Weinberger, Steven. (2015). Speech Accent Archive. George Mason University. Retrieved from http://accent.gmu.edu [[Web](https://accent.gmu.edu)]
+3. Weinberger, Steven et al., "Speech Accent Archive," George Mason University, 2015. [[DOI]](https://accent.gmu.edu/)
 
-3. Todisco et al. (2019) — ASVspoof 2019:
-
-   ```bibtex
-   @InProceedings{Todisco2019,
-     Title                    = {{ASV}spoof 2019: {F}uture {H}orizons in {S}poofed and {F}ake {A}udio {D}etection},
-     Author                   = {Todisco, Massimiliano and Wang, Xin and Sahidullah, Md and Delgado, H ́ector and Nautsch, Andreas and Yamagishi, Junichi and Evans, Nicholas and Kinnunen, Tomi and Lee, Kong Aik},
-     booktitle		   = {Proc. of Interspeech 2019},
-     Year                     = {2019}
-   }
-   ```
-
-4. Chen et al. (2021) — WavLM:
-
-   ```bibtex
-   @article{Chen2021WavLM,
-     title   = {WavLM: Large-Scale Self-Supervised  Pre-training   for Full Stack Speech Processing},
-     author  = {Sanyuan Chen and Chengyi Wang and Zhengyang Chen and Yu Wu and Shujie Liu and Zhuo Chen and Jinyu Li and Naoyuki Kanda and Takuya Yoshioka and Xiong Xiao and Jian Wu and Long Zhou and Shuo Ren and Yanmin Qian and Yao Qian and Jian Wu and Michael Zeng and Furu Wei},
-     eprint={2110.13900},
-     archivePrefix={arXiv},
-     primaryClass={cs.CL},
-     year={2021}
-   }
-   ```
+4. Sanyuan Chen, Chengyi Wang, Zhengyang Chen, Yu Wu, Shujie Liu et al., "WavLM: Large-Scale Self-Supervised Pre-Training for Full Stack Speech Processing," 	Computation and Language, vol. 16, no. 6, pp. 1505-1518, 2022. [[DOI]](https://doi.org/10.48550/arXiv.2110.13900)
